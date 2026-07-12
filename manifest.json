@@ -40,6 +40,7 @@
       "resources": [
         "lib/ort.wasm.min.js",
         "lib/ort-wasm-simd-threaded.wasm",
+        "lib/ort-wasm-simd-threaded.mjs",
         "models/common_old.onnx",
         "models/charset_old.json"
       ],

@@ -90,33 +90,26 @@
   // Main auto-login logic
   // =============================================
   async function performAutoLogin(username, password) {
-    // Step 1: Wait for page to fully load
-    log('等待页面加载...');
-    await sleep(2000);
-
-    // Step 2: Ensure the password login tab is active
-    // The page dynamically loads content into #loginViewDiv
-    // We need the pwdLoginDiv content to be rendered
-    const loginViewDiv = document.getElementById('loginViewDiv');
-    if (!loginViewDiv) {
-      throw new Error('找不到 #loginViewDiv');
-    }
+    // Step 1: Wait for the login container to exist
+    log('等待登录容器加载...');
+    const loginViewDiv = await waitForElement('#loginViewDiv', document.body, 10000);
 
     // Check if password login is already active
     let usernameField = loginViewDiv.querySelector('.m-account #username');
     if (!usernameField) {
       // Need to switch to password login tab
       log('切换到账号登录标签...');
-      const pwdLoginLink = document.getElementById('userNameLogin_a');
+      const pwdLoginLink = await waitForElement('#userNameLogin_a', document.body, 5000).catch(() => null);
       if (pwdLoginLink) {
         pwdLoginLink.click();
-        await sleep(1000);
+        // Wait for the form to appear inside loginViewDiv
+        try {
+          usernameField = await waitForElement('#username', loginViewDiv, 3000);
+        } catch(e) {}
       }
 
-      usernameField = loginViewDiv.querySelector('.m-account #username');
       if (!usernameField) {
-        // Try broader search
-        usernameField = loginViewDiv.querySelector('#username');
+        usernameField = loginViewDiv.querySelector('.m-account #username') || loginViewDiv.querySelector('#username');
       }
       if (!usernameField) {
         throw new Error('找不到用户名输入框');
@@ -150,7 +143,7 @@
     // The page calls checkNeedCaptcha() on username blur
     // For NJU, _badCredentialsCount == 0 means captcha is always shown
     log('等待验证码加载...');
-    await sleep(2000); // Wait for AJAX checkNeedCaptcha and captcha image load
+    // Removed static sleep to ensure instant filling upon page load
 
     let isLoginComplete = false;
     let attempt = 0;
@@ -172,14 +165,13 @@
       const captchaDiv = loginViewDiv.querySelector('#captchaDiv');
       if (captchaDiv && captchaDiv.classList.contains('hide')) {
         log('强制显示验证码区域...');
-        // Trigger captcha reload via page's own function
-        injectScript(`
-          (function() {
-            if (typeof reloadCaptcha === 'function') {
-              reloadCaptcha(true);
-            }
-          })();
-        `);
+        const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
+        if (refreshBtn) {
+          refreshBtn.click();
+        } else {
+          const captchaImg = document.querySelector('#captchaImg');
+          if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
+        }
         await sleep(2000);
       }
 
@@ -192,8 +184,8 @@
 
       // Wait for image to have a valid src
       let retries = 0;
-      while ((!captchaImg.src || !captchaImg.src.includes('getCaptcha')) && retries < 10) {
-        await sleep(500);
+      while ((!captchaImg.src || !captchaImg.src.includes('getCaptcha')) && retries < 25) {
+        await sleep(200);
         retries++;
       }
 
@@ -249,18 +241,13 @@
 
       if (!captchaResult || captchaResult.length === 0) {
         log('验证码识别结果为空，准备重试...', 'warn');
-        injectScript(`
-          (function() {
-            if (typeof reloadCaptcha === 'function') {
-              reloadCaptcha(true);
-            } else {
-               var captchaImg = document.querySelector('#captchaImg');
-               if (captchaImg) {
-                  captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
-               }
-            }
-          })();
-        `);
+        const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
+        if (refreshBtn) {
+          refreshBtn.click();
+        } else {
+           const captchaImg = document.querySelector('#captchaImg');
+           if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
+        }
         await sleep(1500);
         continue;
       }
@@ -291,31 +278,12 @@
       // Step 10: Submit the form via page's own functions
       log('提交登录表单...');
 
-      // Use the page's own encryption and submission logic
-      // Inject script to call the page functions
-      injectScript(`
-        (function() {
-          try {
-            // Encrypt password
-            var pwd = document.querySelector('.login-main .m-account #password');
-            var salt = document.querySelector('.login-main #pwdEncryptSalt') || document.getElementById('pwdEncryptSalt');
-            var saltPwd = document.querySelector('.login-main #saltPassword') || document.getElementById('saltPassword');
-
-            if (pwd && salt && saltPwd && typeof encryptPassword === 'function') {
-              saltPwd.value = encryptPassword(pwd.value, salt.value);
-              pwd.setAttribute('disabled', 'disabled');
-            }
-
-            // Submit form
-            var form = document.querySelector('.login-main .loginFromClass');
-            if (form) {
-              form.submit();
-            }
-          } catch(e) {
-            console.error('[NJU Auto Auth] Submit error:', e);
-          }
-        })();
-      `);
+      const loginBtn = loginViewDiv.querySelector('#login_submit');
+      if (loginBtn) {
+        loginBtn.click();
+      } else {
+        throw new Error('找不到登录按钮');
+      }
 
       // Step 11: Wait and check result
       log('等待登录结果...');
@@ -333,18 +301,13 @@
       if (errorText) {
         if (errorText.includes('验证码')) {
           log(`提示: ${errorText}，立即重试...`, 'warn');
-          injectScript(`
-            (function() {
-              if (typeof reloadCaptcha === 'function') {
-                reloadCaptcha(true);
-              } else {
-                 var captchaImg = document.querySelector('#captchaImg');
-                 if (captchaImg) {
-                    captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
-                 }
-              }
-            })();
-          `);
+          const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
+          if (refreshBtn) {
+            refreshBtn.click();
+          } else {
+             const captchaImg = document.querySelector('#captchaImg');
+             if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
+          }
           if (passwordField) {
             passwordField.removeAttribute('disabled');
             setNativeValue(passwordField, password);
@@ -392,13 +355,6 @@
     element.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  function injectScript(code) {
-    const script = document.createElement('script');
-    script.textContent = code;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-  }
-
   function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -416,9 +372,13 @@
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
+        // Ensure we capture at the exact intrinsic resolution, handling 80x30 properly
+        const w = img.naturalWidth || img.width || 80;
+        const h = img.naturalHeight || img.height || 30;
+        canvas.width = w;
+        canvas.height = h;
+        
+        ctx.drawImage(img, 0, 0, w, h);
         resolve(canvas.toDataURL('image/png'));
       };
       img.onerror = reject;
