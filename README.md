@@ -48,15 +48,26 @@
 
 ## 安装
 
+### 方法一：加载解压后的扩展（推荐）
+
 1. 克隆仓库
 
    ```bash
    git clone https://github.com/your-username/Auto_Auth_Login.git
    ```
 
-2. 打开 `chrome://extensions/`，开启开发者模式
+2. 打开 `chrome://extensions/`（Edge 浏览器为 `edge://extensions/`），开启开发者模式
 
 3. 点击「加载已解压的扩展程序」，选择项目目录
+
+### 方法二：使用 .crx 文件安装
+
+1. 打开浏览器的扩展管理页面（如 `chrome://extensions/` 或 `edge://extensions/`）
+2. 开启页面上的“开发者模式”
+3. 将打包好的 `.crx` 文件直接**拖拽**到该页面中
+4. 在弹出的提示框中点击“添加扩展程序”即可完成安装
+
+> **注意**：受限于 Chrome 的安全策略，通过拖拽安装的非官方 `.crx` 扩展有可能会被浏览器自动禁用。如果遇到这种情况，请改用**方法一**，或使用 Edge 浏览器。
 
 ## 使用
 
