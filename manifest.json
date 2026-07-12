@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "NJU Auto Auth Login",
+  "version": "1.0.0",
+  "description": "自动监控南京大学统一身份认证登录状态，过期时自动重新登录",
+  "permissions": [
+    "storage",
+    "alarms",
+    "offscreen",
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://authserver.nju.edu.cn/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://authserver.nju.edu.cn/authserver/login*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/ort.wasm.min.js",
+        "lib/ort-wasm-simd-threaded.wasm",
+        "models/common_old.onnx",
+        "models/charset_old.json"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
