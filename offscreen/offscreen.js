@@ -558,31 +558,10 @@
       throw new Error(`目标字符不在OCR字符集中: ${targets}`);
     }
 
-    // 5. OCR on each bounding box
-    const recognizedCandidates = [];
-    for (const box of mainBoxes) {
-      const [x1, y1, x2, y2] = box;
-      const w = x2 - x1;
-      const h = y2 - y1;
-      const charBase64 = cropImageToBase64(imageData, x1, y1, w, h);
-      const charText = await solveCaptcha(charBase64, true);
-      console.log(`[ONNX Click] Box [${x1},${y1},${x2},${y2}] recognized as: "${charText}"`);
-      if (charText && charText.length > 0) {
-        recognizedCandidates.push({
-          box,
-          char: charText[0],
-          center: {
-            x: Math.round(x1 + w / 2),
-            y: Math.round(y1 + h / 2)
-          }
-        });
-      }
-    }
-
-    // 6. Score every box against only the four requested characters while
-    // rotating the crop. Upright OCR above is diagnostic only.
+    // 5. Score every box against only the four requested characters while
+    // rotating each crop to compensate for random glyph orientation.
     const coarseAngles = [];
-    for (let angle = 0; angle < 360; angle += 30) coarseAngles.push(angle);
+    for (let angle = 0; angle < 360; angle += 45) coarseAngles.push(angle);
     const rotationCandidates = [];
 
     for (const box of mainBoxes) {
@@ -657,30 +636,6 @@
     );
     console.log(`[ONNX Click] Successfully matched coordinates:`, rotationClickCoords);
     return rotationClickCoords;
-
-    // 6. Match candidates to targets in order
-    const clickCoords = [];
-    const availableCandidates = recognizedCandidates.slice();
-    for (let i = 0; i < targets.length; i++) {
-      const targetChar = targets[i];
-      const matchIndex = availableCandidates.findIndex(c => c.char === targetChar);
-      if (matchIndex !== -1) {
-        const [match] = availableCandidates.splice(matchIndex, 1);
-        clickCoords.push(match.center);
-      } else {
-        console.warn(`[ONNX Click] Target character "${targetChar}" not matched in candidates`);
-      }
-    }
-
-    if (clickCoords.length !== 4) {
-      const candidatesSummary = recognizedCandidates.map(candidate =>
-        `${candidate.char}@(${candidate.center.x},${candidate.center.y})`
-      ).join(', ') || '无';
-      throw new Error(`无法完全匹配所有目标字符. 目标: "${targets}", 匹配成功数: ${clickCoords.length}，候选: ${candidatesSummary}`);
-    }
-
-    console.log('[ONNX Click] Successfully matched coordinates:', clickCoords);
-    return clickCoords;
   }
 
   // --- Decode base64 image using canvas ---

@@ -43,6 +43,39 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  const CAPTCHA_CLICK_Y_OFFSET = -4;
+
+  function setInputValue(input, value) {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value'
+    ).set;
+    setter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function fillLoginCredentials() {
+    const [data, loginNameInput, loginPwdInput] = await Promise.all([
+      chrome.storage.local.get(['nju_username', 'nju_password']),
+      waitForElement('#loginName', 15000),
+      waitForElement('#loginPwd', 15000)
+    ]);
+
+    if (!data.nju_username || !data.nju_password) {
+      throw new Error('插件中尚未保存学号或密码');
+    }
+
+    setInputValue(loginNameInput, data.nju_username);
+    setInputValue(loginPwdInput, data.nju_password);
+    log('已从插件存储填充学号和密码');
+
+    return {
+      username: data.nju_username,
+      password: data.nju_password
+    };
+  }
+
   // ---- Get the captcha image as a base64 Data URL ----
   function getCaptchaImageBase64() {
     return new Promise((resolve, reject) => {
@@ -245,6 +278,37 @@
     return null;
   }
 
+  async function waitForConfirmButton(timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const confirmButton = findConfirmButton();
+      if (confirmButton) return confirmButton;
+      if (isCaptchaError()) return null;
+      await delay(50);
+    }
+    return null;
+  }
+
+  async function clickCourseButton(timeout = 10000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const courseButton = document.getElementById('courseBtn');
+      if (courseButton && !courseButton.disabled && courseButton.offsetParent !== null) {
+        courseButton.click();
+        log('✅ 已点击“开始选课”按钮');
+        return;
+      }
+      await delay(50);
+    }
+    throw new Error('确认轮次后未找到可点击的“开始选课”按钮');
+  }
+
+  async function confirmRoundAndStartCourse(confirmButton) {
+    confirmButton.click();
+    log('✅ 已点击确认按钮，等待“开始选课”按钮...');
+    await clickCourseButton();
+  }
+
   // ---- Main automation loop ----
   async function run() {
     if (isRunning) return;
@@ -252,9 +316,11 @@
     log('选课页面自动化启动');
 
     try {
-      // 1. Wait for the captcha image to appear
-      log('等待验证码图片加载...');
-      await waitForCaptchaImage(15000);
+      // Fill credentials and wait for the captcha concurrently.
+      log('正在并行填充账号密码并等待验证码...');
+      const credentialsPromise = fillLoginCredentials();
+      const captchaPromise = waitForCaptchaImage(15000);
+      const [credentials] = await Promise.all([credentialsPromise, captchaPromise]);
       log('验证码图片已就绪');
 
       while (retryCount < MAX_RETRIES) {
@@ -281,10 +347,11 @@
           const displayedPoints = [];
           for (let i = 0; i < coords.length; i++) {
             const { x, y } = coords[i];
-            const displayedPoint = simulateClick(imgEl, x, y);
+            const adjustedY = Math.max(0, y + CAPTCHA_CLICK_Y_OFFSET);
+            const displayedPoint = simulateClick(imgEl, x, adjustedY);
             displayedPoints.push(displayedPoint);
-            log(`点击第 ${i + 1} 个字符: 原图(${x}, ${y})，页面(${displayedPoint.x}, ${displayedPoint.y})`);
-            await delay(300 + Math.random() * 200); // small human-like delay
+            log(`点击第 ${i + 1} 个字符: 原图(${x}, ${adjustedY})，页面(${displayedPoint.x}, ${displayedPoint.y})`);
+            await delay(40);
           }
 
           // The site submits sessionStorage.verifyResult.  Normally the native
@@ -300,24 +367,28 @@
             throw new Error('页面未能保存四个验证码点击坐标');
           }
 
-          log('验证码点击完成，等待一下再点登录按钮...');
-          await delay(600);
+          log('验证码点击完成，准备登录...');
+          await delay(60);
 
           // 5. Click the login button
           const loginBtn = document.getElementById('studentLoginBtn');
           if (!loginBtn) throw new Error('找不到登录按钮 #studentLoginBtn');
+          const loginNameInput = document.getElementById('loginName');
+          const loginPwdInput = document.getElementById('loginPwd');
+          if (loginNameInput.value !== credentials.username) {
+            setInputValue(loginNameInput, credentials.username);
+          }
+          if (loginPwdInput.value !== credentials.password) {
+            setInputValue(loginPwdInput, credentials.password);
+          }
           loginBtn.click();
           log('已点击登录按钮，等待响应...');
 
-          // 6. Wait and check the result (1-3 seconds)
-          await delay(2000);
-
-          // Check if the confirmation dialog appeared (login succeeded)
-          const confirmBtn = findConfirmButton();
+          // 6. Poll rapidly and continue as soon as confirmation appears.
+          const confirmBtn = await waitForConfirmButton(5000);
           if (confirmBtn) {
             log('✅ 登录成功！检测到选轮次弹窗，点击确认...');
-            confirmBtn.click();
-            log('✅ 已点击确认按钮，完成！');
+            await confirmRoundAndStartCourse(confirmBtn);
             isRunning = false;
             return;
           }
@@ -326,18 +397,16 @@
           if (isCaptchaError()) {
             log('❌ 验证码错误，刷新后重试...', 'warn');
             refreshCaptcha();
-            await delay(1500); // wait for new captcha to load
+            await delay(300);
             await waitForCaptchaImage(8000);
             continue;
           }
 
-          // Neither success nor explicit failure – wait a bit more then check again
-          await delay(1500);
-          const confirmBtn2 = findConfirmButton();
+          // Allow a little more time for a slow server response.
+          const confirmBtn2 = await waitForConfirmButton(2500);
           if (confirmBtn2) {
             log('✅ 延迟检测到选轮次弹窗，点击确认...');
-            confirmBtn2.click();
-            log('✅ 已点击确认按钮，完成！');
+            await confirmRoundAndStartCourse(confirmBtn2);
             isRunning = false;
             return;
           }
@@ -345,13 +414,13 @@
           // Still nothing – assume wrong captcha, refresh and retry
           log('⚠️ 未检测到明确结果，刷新验证码重试...', 'warn');
           refreshCaptcha();
-          await delay(1500);
+          await delay(300);
           await waitForCaptchaImage(8000);
 
         } catch (err) {
           log(`本次尝试失败: ${err.message}，刷新验证码重试...`, 'warn');
           refreshCaptcha();
-          await delay(1500);
+          await delay(300);
           try {
             await waitForCaptchaImage(8000);
           } catch (_) {
@@ -370,9 +439,9 @@
 
   // ---- Entry point: start after page is fully interactive ----
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(run, 1500));
+    document.addEventListener('DOMContentLoaded', run);
   } else {
-    setTimeout(run, 1500);
+    run();
   }
 
 })();
