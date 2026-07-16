@@ -81,21 +81,15 @@
     }
   }
 
-  // --- Solve OCR captcha ---
-  async function solveCaptcha(imageDataBase64, isChinese = false) {
+  // --- Run the OCR model and expose its sequence logits ---
+  async function runOcrInference(imageData) {
     await Promise.all([loadCharset(), loadOcrSession()]);
 
-    // 1. Decode base64 image to ImageData
-    const imageData = await decodeImage(imageDataBase64);
     const { width: origWidth, height: origHeight, data: pixels } = imageData;
 
-    console.log(`[ONNX OCR] Input image: ${origWidth}x${origHeight}, isChinese: ${isChinese}`);
-
-    // 2. Resize to height=64, proportional width
     const targetHeight = 64;
-    const targetWidth = Math.round(origWidth * (targetHeight / origHeight));
+    const targetWidth = Math.max(1, Math.round(origWidth * (targetHeight / origHeight)));
 
-    // 3. Resize and convert to grayscale normalized tensor
     const resizedData = resizeImage(pixels, origWidth, origHeight, targetWidth, targetHeight);
     const inputTensorData = new Float32Array(targetWidth * targetHeight);
 
@@ -109,31 +103,34 @@
         // Grayscale: 0.299R + 0.587G + 0.114B
         const grayscale = r * 0.299 + g * 0.587 + b * 0.114;
 
-        // Normalize: (value / 255.0 - 0.5) / 0.5
-        const normalized = (grayscale / 255.0 - 0.5) / 0.5;
+        // common_old.onnx is trained with grayscale pixels normalized to [0, 1].
+        // Centering them to [-1, 1] substantially reduces recognition accuracy,
+        // especially for the small coloured characters in click captchas.
+        const normalized = grayscale / 255.0;
         inputTensorData[y * targetWidth + x] = normalized;
       }
     }
 
-    // 4. Create input tensor [1, 1, H, W]
     const inputTensor = new ort.Tensor('float32', inputTensorData, [1, 1, targetHeight, targetWidth]);
-
-    // 5. Run inference
-    const inputName = sessionOcr.inputNames[0]; // Should be 'input1'
+    const inputName = sessionOcr.inputNames[0];
     const feeds = {};
     feeds[inputName] = inputTensor;
-
     const results = await sessionOcr.run(feeds);
-
-    // 6. Get output
     const outputName = sessionOcr.outputNames.includes('387') ? '387' : sessionOcr.outputNames[0];
     const outputTensor = results[outputName];
     const outputData = outputTensor.data;
-
-    // 7. CTC Greedy Decoding
     const numClasses = charset.length;
     const seqLen = Math.floor(outputData.length / numClasses);
 
+    return { outputData, numClasses, seqLen };
+  }
+
+  // --- Solve OCR captcha ---
+  async function solveCaptcha(imageDataBase64, isChinese = false) {
+    const imageData = await decodeImage(imageDataBase64);
+    console.log(`[ONNX OCR] Input image: ${imageData.width}x${imageData.height}, isChinese: ${isChinese}`);
+
+    const { outputData, numClasses, seqLen } = await runOcrInference(imageData);
     if (seqLen === 0) return '';
 
     const predictedIndices = [];
@@ -361,6 +358,157 @@
     return canvas.toDataURL('image/png');
   }
 
+  function cropImageData(imageData, x1, y1, x2, y2) {
+    const left = Math.max(0, Math.floor(x1));
+    const top = Math.max(0, Math.floor(y1));
+    const right = Math.min(imageData.width, Math.ceil(x2));
+    const bottom = Math.min(imageData.height, Math.ceil(y2));
+    const width = Math.max(1, right - left);
+    const height = Math.max(1, bottom - top);
+
+    const source = document.createElement('canvas');
+    source.width = imageData.width;
+    source.height = imageData.height;
+    source.getContext('2d').putImageData(imageData, 0, 0);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, left, top, width, height, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height);
+  }
+
+  function getImageBackgroundColor(imageData) {
+    const { width, height, data } = imageData;
+    const points = [
+      [0, 0],
+      [Math.max(0, width - 1), 0],
+      [0, Math.max(0, height - 1)],
+      [Math.max(0, width - 1), Math.max(0, height - 1)]
+    ];
+    const sum = [0, 0, 0];
+    for (const [x, y] of points) {
+      const index = (y * width + x) * 4;
+      sum[0] += data[index];
+      sum[1] += data[index + 1];
+      sum[2] += data[index + 2];
+    }
+    return sum.map(value => Math.round(value / points.length));
+  }
+
+  function rotateImageData(imageData, angleDegrees) {
+    if (angleDegrees % 360 === 0) return imageData;
+
+    const source = document.createElement('canvas');
+    source.width = imageData.width;
+    source.height = imageData.height;
+    source.getContext('2d').putImageData(imageData, 0, 0);
+
+    const diagonal = Math.ceil(Math.sqrt(imageData.width ** 2 + imageData.height ** 2));
+    const canvas = document.createElement('canvas');
+    canvas.width = diagonal;
+    canvas.height = diagonal;
+    const ctx = canvas.getContext('2d');
+    const [r, g, b] = getImageBackgroundColor(imageData);
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(0, 0, diagonal, diagonal);
+    ctx.translate(diagonal / 2, diagonal / 2);
+    ctx.rotate(angleDegrees * Math.PI / 180);
+    ctx.drawImage(source, -imageData.width / 2, -imageData.height / 2);
+    return ctx.getImageData(0, 0, diagonal, diagonal);
+  }
+
+  function extractClickTargets(ocrText) {
+    const chinese = ocrText.replace(/[^\u4e00-\u9fff]/g, '');
+    const markers = ['依次点击', '点击', '击', '点'];
+
+    for (const marker of markers) {
+      const markerIndex = chinese.indexOf(marker);
+      if (markerIndex !== -1) {
+        const payload = chinese.slice(markerIndex + marker.length);
+        if (payload.length >= 4) {
+          // Take the first four characters after the prompt. Taking the last
+          // four can include a closing bracket OCR misreads as Chinese.
+          return payload.slice(0, 4);
+        }
+      }
+    }
+
+    // The fixed prefix 依次点击 is four Chinese characters.
+    if (chinese.length >= 8) return chinese.slice(4, 8);
+    return chinese.slice(0, 4);
+  }
+
+  function scoreTargetsFromOutput(outputData, numClasses, seqLen, targetIndices) {
+    return targetIndices.map(targetIndex => {
+      let bestScore = -Infinity;
+      for (let step = 0; step < seqLen; step++) {
+        const base = step * numClasses;
+        // Target-vs-blank logit scoring works better for constrained matching
+        // than requiring the target to beat all 8210 possible characters.
+        const score = outputData[base + targetIndex] - outputData[base];
+        if (score > bestScore) bestScore = score;
+      }
+      return bestScore;
+    });
+  }
+
+  async function scoreRotatedCandidate(candidateImage, targetIndices, angles) {
+    const bestScores = targetIndices.map(() => -Infinity);
+    const bestAngles = targetIndices.map(() => 0);
+
+    for (const angle of angles) {
+      const rotated = rotateImageData(candidateImage, angle);
+      const inference = await runOcrInference(rotated);
+      const scores = scoreTargetsFromOutput(
+        inference.outputData,
+        inference.numClasses,
+        inference.seqLen,
+        targetIndices
+      );
+
+      for (let targetIndex = 0; targetIndex < scores.length; targetIndex++) {
+        if (scores[targetIndex] > bestScores[targetIndex]) {
+          bestScores[targetIndex] = scores[targetIndex];
+          bestAngles[targetIndex] = angle;
+        }
+      }
+    }
+
+    return { scores: bestScores, angles: bestAngles };
+  }
+
+  function findBestTargetAssignment(candidates, targetCount) {
+    let best = null;
+
+    function search(targetIndex, usedBoxes, assignments, score) {
+      if (targetIndex === targetCount) {
+        if (!best || score > best.score) {
+          best = { score, assignments: assignments.slice() };
+        }
+        return;
+      }
+
+      for (let boxIndex = 0; boxIndex < candidates.length; boxIndex++) {
+        if (usedBoxes.has(boxIndex)) continue;
+        usedBoxes.add(boxIndex);
+        assignments.push(boxIndex);
+        search(
+          targetIndex + 1,
+          usedBoxes,
+          assignments,
+          score + candidates[boxIndex].scores[targetIndex]
+        );
+        assignments.pop();
+        usedBoxes.delete(boxIndex);
+      }
+    }
+
+    search(0, new Set(), [], 0);
+    return best;
+  }
+
   // --- Solve Click Captcha ---
   async function solveClickCaptcha(imageDataBase64) {
     await Promise.all([loadCharset(), loadOcrSession(), loadDetSession()]);
@@ -381,8 +529,9 @@
     const ocrRawResult = await solveCaptcha(barBase64, true);
     console.log(`[ONNX Click] Bottom bar raw OCR: "${ocrRawResult}"`);
 
-    // Clean and extract the 4 target characters from the end
-    const targets = ocrRawResult.slice(-4);
+    // Extract the first four characters after the fixed prompt. This avoids
+    // treating the closing bracket as a target when OCR reads it as 丫.
+    const targets = extractClickTargets(ocrRawResult);
     console.log(`[ONNX Click] Target characters to click in order: "${targets}"`);
 
     if (targets.length !== 4) {
@@ -399,6 +548,15 @@
     });
 
     console.log(`[ONNX Click] Filtered boxes: ${mainBoxes.length} boxes in main area`);
+
+    if (mainBoxes.length < 4) {
+      throw new Error(`目标检测只找到 ${mainBoxes.length} 个候选字，至少需要4个`);
+    }
+
+    const targetIndices = Array.from(targets).map(char => charset.indexOf(char));
+    if (targetIndices.some(index => index < 0)) {
+      throw new Error(`目标字符不在OCR字符集中: ${targets}`);
+    }
 
     // 5. OCR on each bounding box
     const recognizedCandidates = [];
@@ -421,6 +579,85 @@
       }
     }
 
+    // 6. Score every box against only the four requested characters while
+    // rotating the crop. Upright OCR above is diagnostic only.
+    const coarseAngles = [];
+    for (let angle = 0; angle < 360; angle += 30) coarseAngles.push(angle);
+    const rotationCandidates = [];
+
+    for (const box of mainBoxes) {
+      const [x1, y1, x2, y2] = box;
+      const w = x2 - x1;
+      const h = y2 - y1;
+      const padding = Math.max(2, Math.round(Math.max(w, h) * 0.15));
+      const candidateImage = cropImageData(
+        imageData,
+        x1 - padding,
+        y1 - padding,
+        x2 + padding,
+        Math.min(barY, y2 + padding)
+      );
+      const rotationScores = await scoreRotatedCandidate(
+        candidateImage,
+        targetIndices,
+        coarseAngles
+      );
+      rotationCandidates.push({
+        imageData: candidateImage,
+        scores: rotationScores.scores,
+        angles: rotationScores.angles,
+        center: {
+          x: Math.round(x1 + w / 2),
+          y: Math.round(y1 + h / 2)
+        }
+      });
+    }
+
+    // Refine ±15° around each best coarse angle.
+    for (const candidate of rotationCandidates) {
+      const refineAngles = new Set();
+      for (const angle of candidate.angles) {
+        refineAngles.add((angle + 345) % 360);
+        refineAngles.add((angle + 15) % 360);
+      }
+      const refined = await scoreRotatedCandidate(
+        candidate.imageData,
+        targetIndices,
+        Array.from(refineAngles)
+      );
+      for (let targetIndex = 0; targetIndex < targets.length; targetIndex++) {
+        if (refined.scores[targetIndex] > candidate.scores[targetIndex]) {
+          candidate.scores[targetIndex] = refined.scores[targetIndex];
+          candidate.angles[targetIndex] = refined.angles[targetIndex];
+        }
+      }
+    }
+
+    const rotationAssignment = findBestTargetAssignment(rotationCandidates, targets.length);
+    if (!rotationAssignment) {
+      throw new Error(`无法为目标字符建立一一匹配: ${targets}`);
+    }
+
+    const assignedScores = rotationAssignment.assignments.map(
+      (boxIndex, targetIndex) => rotationCandidates[boxIndex].scores[targetIndex]
+    );
+    const scoreSummary = rotationAssignment.assignments.map((boxIndex, targetIndex) => {
+      const candidate = rotationCandidates[boxIndex];
+      return `${targets[targetIndex]}@(${candidate.center.x},${candidate.center.y})`
+        + `=${candidate.scores[targetIndex].toFixed(2)}/${candidate.angles[targetIndex]}°`;
+    }).join(`, `);
+    console.log(`[ONNX Click] Rotation-aware assignment: ${scoreSummary}`);
+
+    if (assignedScores.some(score => !Number.isFinite(score) || score <= 0)) {
+      throw new Error(`旋转识别置信度不足. 目标: ${targets}, 匹配: ${scoreSummary}`);
+    }
+
+    const rotationClickCoords = rotationAssignment.assignments.map(
+      boxIndex => rotationCandidates[boxIndex].center
+    );
+    console.log(`[ONNX Click] Successfully matched coordinates:`, rotationClickCoords);
+    return rotationClickCoords;
+
     // 6. Match candidates to targets in order
     const clickCoords = [];
     const availableCandidates = recognizedCandidates.slice();
@@ -436,7 +673,10 @@
     }
 
     if (clickCoords.length !== 4) {
-      throw new Error(`无法完全匹配所有目标字符. 目标: "${targets}", 匹配成功数: ${clickCoords.length}`);
+      const candidatesSummary = recognizedCandidates.map(candidate =>
+        `${candidate.char}@(${candidate.center.x},${candidate.center.y})`
+      ).join(', ') || '无';
+      throw new Error(`无法完全匹配所有目标字符. 目标: "${targets}", 匹配成功数: ${clickCoords.length}，候选: ${candidatesSummary}`);
     }
 
     console.log('[ONNX Click] Successfully matched coordinates:', clickCoords);

@@ -266,7 +266,7 @@ async function handleSolveClickCaptcha(imageData) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error('点击验证码识别超时'));
-    }, 30000);
+    }, 60000);
 
     chrome.runtime.sendMessage(
       { action: 'offscreen_solveClickCaptcha', imageData },

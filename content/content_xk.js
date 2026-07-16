@@ -118,6 +118,44 @@
     return { x: Math.round(offsetX), y: Math.round(offsetY) };
   }
 
+  // ---- Read/write the state that the page itself submits to the server ----
+  function getRecordedCaptchaPoints() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem('verifyResult') || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function storeCaptchaPoints(points) {
+    sessionStorage.setItem('verifyResult', JSON.stringify(points.map(point => ({
+      left: point.x,
+      top: point.y
+    }))));
+  }
+
+  function showRecordedCaptchaPoints(image, points) {
+    const container = image.parentElement;
+    if (!container) return;
+
+    container.querySelectorAll('.yidun_icon-point').forEach(marker => marker.remove());
+    points.forEach((point, index) => {
+      const marker = document.createElement('div');
+      marker.className = `yidun_icon-point yidun_point-${index + 1}`;
+      marker.style.marginLeft = `${point.x - 13}px`;
+      marker.style.marginTop = `${point.y - 33}px`;
+      container.appendChild(marker);
+    });
+  }
+
+  function pointsMatch(recorded, expected) {
+    return recorded.length === expected.length && recorded.every((point, index) =>
+      Math.abs(Number(point.left) - expected[index].x) <= 1 &&
+      Math.abs(Number(point.top) - expected[index].y) <= 1
+    );
+  }
+
   // ---- Ask the background / offscreen worker to solve the click-captcha ----
   function solveClickCaptcha(imageBase64) {
     return new Promise((resolve, reject) => {
@@ -240,11 +278,26 @@
           }
 
           // 4. Click each coordinate in order on the captcha image
+          const displayedPoints = [];
           for (let i = 0; i < coords.length; i++) {
             const { x, y } = coords[i];
             const displayedPoint = simulateClick(imgEl, x, y);
+            displayedPoints.push(displayedPoint);
             log(`点击第 ${i + 1} 个字符: 原图(${x}, ${y})，页面(${displayedPoint.x}, ${displayedPoint.y})`);
             await delay(300 + Math.random() * 200); // small human-like delay
+          }
+
+          // The site submits sessionStorage.verifyResult.  Normally the native
+          // click handler above fills it; record it explicitly if an isolated
+          // content-script event was not observed by that handler.
+          const recordedPoints = getRecordedCaptchaPoints();
+          if (!pointsMatch(recordedPoints, displayedPoints)) {
+            log(`页面未登记合成点击（当前 ${recordedPoints.length}/4），回退写入验证码坐标`, 'warn');
+            storeCaptchaPoints(displayedPoints);
+            showRecordedCaptchaPoints(imgEl, displayedPoints);
+          }
+          if (getRecordedCaptchaPoints().length !== 4) {
+            throw new Error('页面未能保存四个验证码点击坐标');
           }
 
           log('验证码点击完成，等待一下再点登录按钮...');
