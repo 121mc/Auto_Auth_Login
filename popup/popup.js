@@ -16,9 +16,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const statusCard = document.getElementById('statusCard');
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
-  const lastCheckTime = document.getElementById('lastCheckTime');
   const nextCheckTime = document.getElementById('nextCheckTime');
-  const loginCount = document.getElementById('loginCount');
 
   // ----- Load saved settings -----
   const data = await chrome.storage.local.get([
@@ -37,10 +35,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   periodicCheckToggle.checked = authAutoLoginToggle.checked && data.nju_enabled === true;
   courseAutoLoginToggle.checked = data.nju_course_auto_login ?? legacyPageAutomation;
   updatePeriodicCheckAvailability();
-  loginCount.textContent = data.nju_login_count || 0;
-
   updateStatus(data.nju_status || 'idle');
-  updateTimeDisplay(lastCheckTime, data.nju_last_check);
   updateNextCheckDisplay(data.nju_next_check);
   renderLogs(data.nju_logs || []);
 
@@ -121,14 +116,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (changes.nju_status) {
       updateStatus(changes.nju_status.newValue);
     }
-    if (changes.nju_last_check) {
-      updateTimeDisplay(lastCheckTime, changes.nju_last_check.newValue);
-    }
     if (changes.nju_next_check) {
       updateNextCheckDisplay(changes.nju_next_check.newValue);
-    }
-    if (changes.nju_login_count) {
-      loginCount.textContent = changes.nju_login_count.newValue || 0;
     }
     if (changes.nju_logs) {
       renderLogs(changes.nju_logs.newValue || []);
@@ -162,15 +151,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       default:
         statusText.textContent = '未配置';
     }
-  }
-
-  function updateTimeDisplay(el, timestamp) {
-    if (!timestamp) {
-      el.textContent = '-';
-      return;
-    }
-    const d = new Date(timestamp);
-    el.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
   function updateNextCheckDisplay(timestamp) {
