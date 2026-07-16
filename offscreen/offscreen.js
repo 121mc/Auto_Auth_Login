@@ -9,73 +9,81 @@
   let sessionOcr = null;
   let sessionDet = null;
   let charset = null;
-  let initializing = false;
-  let initPromise = null;
+  let charsetPromise = null;
+  let ocrSessionPromise = null;
+  let detSessionPromise = null;
 
   // Configure ONNX Runtime
   ort.env.wasm.wasmPaths = chrome.runtime.getURL('lib/');
   ort.env.wasm.numThreads = 1; // Avoid SharedArrayBuffer issues in extension
 
-  // --- Initialize models ---
-  async function initialize() {
-    if (sessionOcr && sessionDet && charset) return;
-    if (initializing) {
-      await initPromise;
-      return;
+  // --- Load only the resources required by the current captcha type ---
+  async function loadCharset() {
+    if (charset) return;
+    if (!charsetPromise) {
+      charsetPromise = (async () => {
+        const charsetUrl = chrome.runtime.getURL('models/charset_old.json');
+        const response = await fetch(charsetUrl);
+        if (!response.ok) throw new Error(`字符集加载失败: ${response.status}`);
+        charset = await response.json();
+        console.log(`[ONNX] Charset loaded: ${charset.length} characters`);
+      })();
     }
+    try {
+      await charsetPromise;
+    } catch (err) {
+      charsetPromise = null;
+      throw err;
+    }
+  }
 
-    initializing = true;
-    initPromise = (async () => {
-      try {
-        console.log('[ONNX] Initializing models...');
+  async function loadOcrSession() {
+    if (sessionOcr) return;
+    if (!ocrSessionPromise) {
+      ocrSessionPromise = (async () => {
+        const modelUrl = chrome.runtime.getURL('models/common_old.onnx');
+        const response = await fetch(modelUrl);
+        if (!response.ok) throw new Error(`OCR 模型加载失败: ${response.status}`);
+        sessionOcr = await ort.InferenceSession.create(await response.arrayBuffer(), {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all'
+        });
+        console.log('[ONNX] OCR model loaded successfully');
+      })();
+    }
+    try {
+      await ocrSessionPromise;
+    } catch (err) {
+      ocrSessionPromise = null;
+      throw err;
+    }
+  }
 
-        // Load charset
-        if (!charset) {
-          const charsetUrl = chrome.runtime.getURL('models/charset_old.json');
-          const charsetResponse = await fetch(charsetUrl);
-          charset = await charsetResponse.json();
-          console.log(`[ONNX] Charset loaded: ${charset.length} characters`);
-        }
-
-        // Load OCR model
-        if (!sessionOcr) {
-          const modelOcrUrl = chrome.runtime.getURL('models/common_old.onnx');
-          const modelOcrResponse = await fetch(modelOcrUrl);
-          const modelOcrBuffer = await modelOcrResponse.arrayBuffer();
-
-          sessionOcr = await ort.InferenceSession.create(modelOcrBuffer, {
-            executionProviders: ['wasm'],
-            graphOptimizationLevel: 'all'
-          });
-          console.log('[ONNX] OCR model loaded successfully');
-        }
-
-        // Load Detection model
-        if (!sessionDet) {
-          const modelDetUrl = chrome.runtime.getURL('models/common_det.onnx');
-          const modelDetResponse = await fetch(modelDetUrl);
-          const modelDetBuffer = await modelDetResponse.arrayBuffer();
-
-          sessionDet = await ort.InferenceSession.create(modelDetBuffer, {
-            executionProviders: ['wasm'],
-            graphOptimizationLevel: 'all'
-          });
-          console.log('[ONNX] Detection model loaded successfully');
-        }
-      } catch (err) {
-        console.error('[ONNX] Initialization failed:', err);
-        throw err;
-      } finally {
-        initializing = false;
-      }
-    })();
-
-    await initPromise;
+  async function loadDetSession() {
+    if (sessionDet) return;
+    if (!detSessionPromise) {
+      detSessionPromise = (async () => {
+        const modelUrl = chrome.runtime.getURL('models/common_det.onnx');
+        const response = await fetch(modelUrl);
+        if (!response.ok) throw new Error(`检测模型加载失败: ${response.status}`);
+        sessionDet = await ort.InferenceSession.create(await response.arrayBuffer(), {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all'
+        });
+        console.log('[ONNX] Detection model loaded successfully');
+      })();
+    }
+    try {
+      await detSessionPromise;
+    } catch (err) {
+      detSessionPromise = null;
+      throw err;
+    }
   }
 
   // --- Solve OCR captcha ---
   async function solveCaptcha(imageDataBase64, isChinese = false) {
-    await initialize();
+    await Promise.all([loadCharset(), loadOcrSession()]);
 
     // 1. Decode base64 image to ImageData
     const imageData = await decodeImage(imageDataBase64);
@@ -232,6 +240,7 @@
 
   // --- Run Target Detection ---
   async function runTargetDetection(imageData) {
+    await loadDetSession();
     const { width: origWidth, height: origHeight } = imageData;
 
     console.log(`[ONNX Det] Running target detection on image: ${origWidth}x${origHeight}`);
@@ -354,7 +363,7 @@
 
   // --- Solve Click Captcha ---
   async function solveClickCaptcha(imageDataBase64) {
-    await initialize();
+    await Promise.all([loadCharset(), loadOcrSession(), loadDetSession()]);
 
     // 1. Decode main image
     const imageData = await decodeImage(imageDataBase64);
@@ -414,10 +423,12 @@
 
     // 6. Match candidates to targets in order
     const clickCoords = [];
+    const availableCandidates = recognizedCandidates.slice();
     for (let i = 0; i < targets.length; i++) {
       const targetChar = targets[i];
-      const match = recognizedCandidates.find(c => c.char === targetChar);
-      if (match) {
+      const matchIndex = availableCandidates.findIndex(c => c.char === targetChar);
+      if (matchIndex !== -1) {
+        const [match] = availableCandidates.splice(matchIndex, 1);
         clickCoords.push(match.center);
       } else {
         console.warn(`[ONNX Click] Target character "${targetChar}" not matched in candidates`);

@@ -76,11 +76,26 @@
     });
   }
 
-  // ---- Simulate a click at (relX, relY) relative to the element ----
+  // ---- Simulate a click at source-image coordinates (relX, relY) ----
   function simulateClick(element, relX, relY) {
     const rect = element.getBoundingClientRect();
-    const clientX = rect.left + relX;
-    const clientY = rect.top + relY;
+    const sourceWidth = element.naturalWidth;
+    const sourceHeight = element.naturalHeight;
+
+    if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) {
+      throw new Error('验证码图片尺寸无效，无法换算点击坐标');
+    }
+    if (!Number.isFinite(relX) || !Number.isFinite(relY) ||
+        relX < 0 || relY < 0 || relX >= sourceWidth || relY >= sourceHeight) {
+      throw new Error(`验证码坐标越界: (${relX}, ${relY})，原图尺寸: ${sourceWidth}x${sourceHeight}`);
+    }
+
+    // The detector works on the image's natural pixels, whereas the page stores
+    // event.offsetX/Y in CSS pixels.  Convert before dispatching the click.
+    const offsetX = Math.max(0, Math.min(rect.width - 1, relX * rect.width / sourceWidth));
+    const offsetY = Math.max(0, Math.min(rect.height - 1, relY * rect.height / sourceHeight));
+    const clientX = rect.left + offsetX;
+    const clientY = rect.top + offsetY;
 
     const opts = {
       bubbles: true,
@@ -94,11 +109,13 @@
 
     ['mousedown', 'mouseup', 'click'].forEach(type => {
       const evt = new MouseEvent(type, opts);
-      // Polyfill offsetX / offsetY since MouseEventInit doesn't expose them
-      Object.defineProperty(evt, 'offsetX', { value: relX, enumerable: true });
-      Object.defineProperty(evt, 'offsetY', { value: relY, enumerable: true });
+      // The page handler reads offsetX / offsetY, which MouseEventInit cannot set.
+      Object.defineProperty(evt, 'offsetX', { value: offsetX, enumerable: true });
+      Object.defineProperty(evt, 'offsetY', { value: offsetY, enumerable: true });
       element.dispatchEvent(evt);
     });
+
+    return { x: Math.round(offsetX), y: Math.round(offsetY) };
   }
 
   // ---- Ask the background / offscreen worker to solve the click-captcha ----
@@ -218,12 +235,15 @@
           log('正在识别验证码...');
           const coords = await solveClickCaptcha(imageBase64);
           log(`识别成功，点击坐标: ${JSON.stringify(coords)}`);
+          if (!Array.isArray(coords) || coords.length !== 4) {
+            throw new Error(`验证码识别结果无效: ${JSON.stringify(coords)}`);
+          }
 
           // 4. Click each coordinate in order on the captcha image
           for (let i = 0; i < coords.length; i++) {
             const { x, y } = coords[i];
-            log(`点击第 ${i + 1} 个字符: (${x}, ${y})`);
-            simulateClick(imgEl, x, y);
+            const displayedPoint = simulateClick(imgEl, x, y);
+            log(`点击第 ${i + 1} 个字符: 原图(${x}, ${y})，页面(${displayedPoint.x}, ${displayedPoint.y})`);
             await delay(300 + Math.random() * 200); // small human-like delay
           }
 
