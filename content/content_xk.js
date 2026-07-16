@@ -43,7 +43,7 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  const CAPTCHA_CLICK_Y_OFFSET = -4;
+  const CAPTCHA_CLICK_Y_OFFSET = -11;
 
   function setInputValue(input, value) {
     const setter = Object.getOwnPropertyDescriptor(
@@ -438,8 +438,9 @@
   }
 
   // ---- Entry point: only run when front-page automation is enabled ----
-  chrome.storage.local.get('nju_page_auto_login').then(data => {
-    if (!data.nju_page_auto_login) return;
+  chrome.storage.local.get(['nju_course_auto_login', 'nju_page_auto_login']).then(data => {
+    const courseAutoLoginEnabled = data.nju_course_auto_login ?? data.nju_page_auto_login === true;
+    if (!courseAutoLoginEnabled) return;
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', run);
     } else {

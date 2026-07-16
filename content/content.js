@@ -16,6 +16,48 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  async function refreshCaptcha(loginViewDiv, captchaImg = null, timeoutMs = 2000) {
+    const image = captchaImg || loginViewDiv.querySelector('#captchaImg') ||
+                  document.querySelector('.login-main #captchaImg');
+    if (!image) return false;
+
+    const previousSrc = image.src;
+    const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
+    if (refreshBtn) {
+      refreshBtn.click();
+    } else {
+      image.src = '/authserver/getCaptcha.htl?' + Date.now();
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hasNewImage = image.src && image.src.includes('getCaptcha') &&
+                          image.src !== previousSrc && image.complete &&
+                          image.naturalWidth > 0;
+      if (hasNewImage) return true;
+      await sleep(50);
+    }
+    return false;
+  }
+
+  function getLoginErrorText() {
+    const errorTip = document.querySelector('.login-main #showErrorTip');
+    return errorTip ? errorTip.textContent.trim() : '';
+  }
+
+  async function waitForLoginOutcome(timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!window.location.href.includes('authserver/login')) {
+        return { success: true };
+      }
+      const errorText = getLoginErrorText();
+      if (errorText) return { errorText };
+      await sleep(100);
+    }
+    return { timedOut: true };
+  }
+
   function waitForElement(selector, container, timeoutMs = 10000) {
     return new Promise((resolve, reject) => {
       const el = container.querySelector(selector);
@@ -48,11 +90,13 @@
 
   // --- Check if we should auto-login ---
   const data = await chrome.storage.local.get([
-    'nju_auto_login_pending', 'nju_username', 'nju_password', 'nju_page_auto_login'
+    'nju_auto_login_pending', 'nju_username', 'nju_password',
+    'nju_auth_auto_login', 'nju_page_auto_login'
   ]);
 
   const isPending = data.nju_auto_login_pending;
-  const isPageLogin = !isPending && data.nju_page_auto_login === true;
+  const authAutoLoginEnabled = data.nju_auth_auto_login ?? data.nju_page_auto_login === true;
+  const isPageLogin = !isPending && authAutoLoginEnabled;
 
   if (!isPending && !isPageLogin) {
     // Not triggered by our extension and auto-login not enabled, do nothing
@@ -124,7 +168,7 @@
     usernameField.dispatchEvent(new Event('change', { bubbles: true }));
     usernameField.dispatchEvent(new Event('focusout', { bubbles: true }));
     usernameField.dispatchEvent(new Event('blur', { bubbles: true }));
-    await sleep(500);
+    await sleep(100);
 
     // Step 4: Fill password
     log('填写密码...');
@@ -137,7 +181,7 @@
     setNativeValue(passwordField, password);
     passwordField.dispatchEvent(new Event('input', { bubbles: true }));
     passwordField.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(500);
+    await sleep(100);
 
     // Step 5: Wait for captcha to load and solve it in a loop
     // The page calls checkNeedCaptcha() on username blur
@@ -165,14 +209,7 @@
       const captchaDiv = loginViewDiv.querySelector('#captchaDiv');
       if (captchaDiv && captchaDiv.classList.contains('hide')) {
         log('强制显示验证码区域...');
-        const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
-        if (refreshBtn) {
-          refreshBtn.click();
-        } else {
-          const captchaImg = document.querySelector('#captchaImg');
-          if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
-        }
-        await sleep(2000);
+        await refreshCaptcha(loginViewDiv);
       }
 
       // Step 6: Get captcha image
@@ -190,11 +227,9 @@
       }
 
       if (!captchaImg.src || !captchaImg.src.includes('getCaptcha')) {
-        // Manually trigger captcha load
+        // Manually trigger captcha load and continue as soon as the image updates.
         log('手动触发验证码加载...');
-        const captchaSrc = '/authserver/getCaptcha.htl?' + Date.now();
-        captchaImg.src = captchaSrc;
-        await sleep(2000);
+        await refreshCaptcha(loginViewDiv, captchaImg);
       }
 
       log(`验证码图片URL: ${captchaImg.src}`);
@@ -241,14 +276,7 @@
 
       if (!captchaResult || captchaResult.length === 0) {
         log('验证码识别结果为空，准备重试...', 'warn');
-        const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
-        if (refreshBtn) {
-          refreshBtn.click();
-        } else {
-           const captchaImg = document.querySelector('#captchaImg');
-           if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
-        }
-        await sleep(1500);
+        await refreshCaptcha(loginViewDiv, captchaImg);
         continue;
       }
 
@@ -263,7 +291,7 @@
       setNativeValue(captchaInput, captchaResult);
       captchaInput.dispatchEvent(new Event('input', { bubbles: true }));
       captchaInput.dispatchEvent(new Event('change', { bubbles: true }));
-      await sleep(300);
+      await sleep(50);
 
       // Restore password if it was disabled in previous attempt
       const passwordField = loginViewDiv.querySelector('.m-account #password') ||
@@ -285,52 +313,30 @@
         throw new Error('找不到登录按钮');
       }
 
-      // Step 11: Wait and check result
+      // Step 11: Continue as soon as the page redirects or reports an error.
       log('等待登录结果...');
-      await sleep(2000);
+      const outcome = await waitForLoginOutcome();
 
-      if (!window.location.href.includes('authserver/login')) {
+      if (outcome.success) {
         isLoginComplete = true;
         break;
       }
 
-      // Check for error messages
-      const errorTip = document.querySelector('.login-main #showErrorTip');
-      const errorText = errorTip ? errorTip.textContent.trim() : '';
-
-      if (errorText) {
-        if (errorText.includes('验证码')) {
-          log(`提示: ${errorText}，立即重试...`, 'warn');
-          const refreshBtn = loginViewDiv.querySelector('.captcha-refresh');
-          if (refreshBtn) {
-            refreshBtn.click();
-          } else {
-             const captchaImg = document.querySelector('#captchaImg');
-             if (captchaImg) captchaImg.src = '/authserver/getCaptcha.htl?' + Date.now();
-          }
+      if (outcome.errorText) {
+        if (outcome.errorText.includes('验证码')) {
+          log(`提示: ${outcome.errorText}，立即重试...`, 'warn');
+          await refreshCaptcha(loginViewDiv, captchaImg);
           if (passwordField) {
             passwordField.removeAttribute('disabled');
             setNativeValue(passwordField, password);
             passwordField.dispatchEvent(new Event('input', { bubbles: true }));
             passwordField.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          await sleep(1000);
         } else {
-          throw new Error(`登录失败: ${errorText}`);
+          throw new Error(`登录失败: ${outcome.errorText}`);
         }
       } else {
-        await sleep(2000);
-        if (!window.location.href.includes('authserver/login')) {
-          isLoginComplete = true;
-          break;
-        } else {
-          await sleep(2000);
-          if (!window.location.href.includes('authserver/login')) {
-            isLoginComplete = true;
-            break;
-          }
-          log('长时间无响应，准备重试...');
-        }
+        log('长时间无响应，准备重试...');
       }
     }
 

@@ -75,35 +75,40 @@
         </button>
       </div>
 
-      <!-- Enable Toggle -->
+      <div class="actions">
+        <button class="btn btn-primary" id="saveBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+            <polyline points="7 3 7 8 15 8"></polyline>
+          </svg>
+          保存学号和密码
+        </button>
+      </div>
+
       <div class="toggle-row">
-        <label for="enableToggle">启用自动登录</label>
+        <label for="authAutoLoginToggle">自动登录统一身份认证</label>
         <label class="toggle-switch">
-          <input type="checkbox" id="enableToggle">
+          <input type="checkbox" id="authAutoLoginToggle">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row toggle-row-child" id="periodicCheckRow">
+        <label for="periodicCheckToggle">定时检查登录情况</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="periodicCheckToggle">
           <span class="toggle-slider"></span>
         </label>
       </div>
 
       <div class="toggle-row">
-        <label for="pageAutoLoginToggle">前台认证页和选课站自动登录</label>
+        <label for="courseAutoLoginToggle">自动登录选课页面</label>
         <label class="toggle-switch">
-          <input type="checkbox" id="pageAutoLoginToggle">
+          <input type="checkbox" id="courseAutoLoginToggle">
           <span class="toggle-slider"></span>
         </label>
       </div>
-    </div>
-
-    <!-- Action Buttons -->
-    <div class="actions">
-      <button class="btn btn-primary" id="saveBtn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-          <polyline points="17 21 17 13 7 13 7 21"></polyline>
-          <polyline points="7 3 7 8 15 8"></polyline>
-        </svg>
-        保存设置
-      </button>
-
     </div>
 
     <!-- Log Area -->

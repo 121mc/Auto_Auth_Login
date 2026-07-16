@@ -272,6 +272,18 @@ body {
   cursor: pointer;
 }
 
+.toggle-row-child {
+  margin-left: 12px;
+}
+
+.toggle-row-child.is-disabled {
+  opacity: 0.55;
+}
+
+.toggle-switch input:disabled + .toggle-slider {
+  cursor: not-allowed;
+}
+
 .toggle-switch {
   position: relative;
   width: 42px;

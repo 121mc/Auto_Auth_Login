@@ -5,8 +5,10 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const usernameInput = document.getElementById('username');
   const passwordInput = document.getElementById('password');
-  const enableToggle = document.getElementById('enableToggle');
-  const pageAutoLoginToggle = document.getElementById('pageAutoLoginToggle');
+  const authAutoLoginToggle = document.getElementById('authAutoLoginToggle');
+  const periodicCheckToggle = document.getElementById('periodicCheckToggle');
+  const periodicCheckRow = document.getElementById('periodicCheckRow');
+  const courseAutoLoginToggle = document.getElementById('courseAutoLoginToggle');
   const saveBtn = document.getElementById('saveBtn');
   const togglePasswordBtn = document.getElementById('togglePassword');
   const clearLogBtn = document.getElementById('clearLogBtn');
@@ -20,15 +22,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ----- Load saved settings -----
   const data = await chrome.storage.local.get([
-    'nju_username', 'nju_password', 'nju_enabled', 'nju_page_auto_login',
+    'nju_username', 'nju_password', 'nju_enabled',
+    'nju_auth_auto_login', 'nju_course_auto_login', 'nju_page_auto_login',
     'nju_last_check', 'nju_next_check', 'nju_login_count',
     'nju_status', 'nju_logs'
   ]);
 
   if (data.nju_username) usernameInput.value = data.nju_username;
   if (data.nju_password) passwordInput.value = data.nju_password;
-  enableToggle.checked = data.nju_enabled === true;
-  pageAutoLoginToggle.checked = data.nju_page_auto_login === true;
+
+  // Keep existing installations working until each new toggle is changed once.
+  const legacyPageAutomation = data.nju_page_auto_login === true;
+  authAutoLoginToggle.checked = data.nju_auth_auto_login ?? legacyPageAutomation;
+  periodicCheckToggle.checked = authAutoLoginToggle.checked && data.nju_enabled === true;
+  courseAutoLoginToggle.checked = data.nju_course_auto_login ?? legacyPageAutomation;
+  updatePeriodicCheckAvailability();
   loginCount.textContent = data.nju_login_count || 0;
 
   updateStatus(data.nju_status || 'idle');
@@ -44,12 +52,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     togglePasswordBtn.querySelector('.eye-closed').style.display = isPassword ? 'block' : 'none';
   });
 
-  // ----- Save settings -----
+  // ----- Save credentials -----
   saveBtn.addEventListener('click', async () => {
     const username = usernameInput.value.trim();
     const password = passwordInput.value;
-    const enabled = enableToggle.checked;
-    const pageAutoLoginEnabled = pageAutoLoginToggle.checked;
 
     if (!username || !password) {
       showToast('请填写学号和密码', 'error');
@@ -59,17 +65,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     await chrome.storage.local.set({
       nju_username: username,
       nju_password: password,
-      nju_enabled: enabled,
-      nju_page_auto_login: pageAutoLoginEnabled,
     });
-
-    // Notify background to update alarm
-    chrome.runtime.sendMessage({ action: 'updateSettings', enabled });
-
-    showToast('设置已保存', 'success');
-    addLog('设置已保存' + (enabled ? '，自动登录已启用' : '，自动登录已禁用'));
+    showToast('学号和密码已保存', 'success');
+    addLog('学号和密码已保存');
   });
 
+  // ----- Toggle settings save immediately -----
+  authAutoLoginToggle.addEventListener('change', async () => {
+    const enabled = authAutoLoginToggle.checked;
+    await chrome.storage.local.set({ nju_auth_auto_login: enabled });
+
+    if (!enabled) {
+      periodicCheckToggle.checked = false;
+      await chrome.storage.local.set({ nju_enabled: false });
+      chrome.runtime.sendMessage({ action: 'updateSettings', enabled: false });
+    }
+    updatePeriodicCheckAvailability();
+    showToast(enabled ? '统一身份认证自动登录已开启' : '统一身份认证自动登录已关闭', 'success');
+  });
+
+  periodicCheckToggle.addEventListener('change', async () => {
+    if (!authAutoLoginToggle.checked) {
+      periodicCheckToggle.checked = false;
+      return;
+    }
+
+    const enabled = periodicCheckToggle.checked;
+    await chrome.storage.local.set({ nju_enabled: enabled });
+    chrome.runtime.sendMessage({ action: 'updateSettings', enabled });
+    showToast(enabled ? '定时检查已开启' : '定时检查已关闭', 'success');
+  });
+
+  courseAutoLoginToggle.addEventListener('change', async () => {
+    const enabled = courseAutoLoginToggle.checked;
+    await chrome.storage.local.set({ nju_course_auto_login: enabled });
+    showToast(enabled ? '选课页面自动登录已开启' : '选课页面自动登录已关闭', 'success');
+  });
+
+  function updatePeriodicCheckAvailability() {
+    const enabled = authAutoLoginToggle.checked;
+    periodicCheckToggle.disabled = !enabled;
+    periodicCheckRow.classList.toggle('is-disabled', !enabled);
+  }
 
   // ----- Clear logs -----
   clearLogBtn.addEventListener('click', async () => {

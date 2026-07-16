@@ -5,6 +5,7 @@
 const ALARM_NAME = 'nju_auth_check';
 const LOGIN_URL = 'https://authserver.nju.edu.cn/authserver/login';
 const REDIRECT_URL = 'https://authserver.nju.edu.cn/personalInfo/personCenter/index.html';
+let loginCompletionInProgress = false;
 
 // --- Logging Helper ---
 async function addLog(msg, level = 'info') {
@@ -24,8 +25,11 @@ function getRandomIntervalMinutes() {
 
 // --- Schedule next alarm ---
 async function scheduleNextAlarm() {
-  const data = await chrome.storage.local.get('nju_enabled');
-  if (!data.nju_enabled) {
+  const data = await chrome.storage.local.get([
+    'nju_enabled', 'nju_auth_auto_login', 'nju_page_auto_login'
+  ]);
+  const authAutoLoginEnabled = data.nju_auth_auto_login ?? data.nju_page_auto_login === true;
+  if (!data.nju_enabled || !authAutoLoginEnabled) {
     await chrome.alarms.clear(ALARM_NAME);
     await chrome.storage.local.set({ nju_next_check: null });
     return;
@@ -43,16 +47,21 @@ async function scheduleNextAlarm() {
 
 // --- Check login status ---
 async function checkLoginStatus(isManual = false) {
-  const data = await chrome.storage.local.get(['nju_username', 'nju_password', 'nju_enabled']);
+  const data = await chrome.storage.local.get([
+    'nju_username', 'nju_password', 'nju_enabled',
+    'nju_auth_auto_login', 'nju_page_auto_login'
+  ]);
+  const authAutoLoginEnabled = data.nju_auth_auto_login ?? data.nju_page_auto_login === true;
+  const periodicCheckEnabled = data.nju_enabled && authAutoLoginEnabled;
 
-  if (!isManual && !data.nju_enabled) {
-    await chrome.storage.local.set({ nju_status: 'disabled' });
+  if (!isManual && !periodicCheckEnabled) {
+    await chrome.storage.local.set({ nju_status: authAutoLoginEnabled ? 'idle' : 'disabled' });
     return;
   }
 
   if (!data.nju_username || !data.nju_password) {
     await addLog('未配置用户名或密码，跳过检查', 'warn');
-    await chrome.storage.local.set({ nju_status: data.nju_enabled ? 'idle' : 'disabled' });
+    await chrome.storage.local.set({ nju_status: periodicCheckEnabled ? 'idle' : 'disabled' });
     return;
   }
 
@@ -115,6 +124,7 @@ async function performLogin() {
       active: false  // Open in background
     });
 
+    await chrome.storage.local.set({ nju_auto_login_tab_id: tab.id });
     await addLog(`已打开登录页面 (标签页 #${tab.id})`);
 
     // The content script reports success or failure after its retry loop.
@@ -197,7 +207,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleUpdateSettings(enabled) {
   if (enabled) {
-    await addLog('自动登录已启用');
+    await addLog('定时检查已启用');
     await checkLoginStatus();
   } else {
     await chrome.alarms.clear(ALARM_NAME);
@@ -205,7 +215,7 @@ async function handleUpdateSettings(enabled) {
       nju_status: 'disabled',
       nju_next_check: null
     });
-    await addLog('自动登录已禁用');
+    await addLog('定时检查已禁用');
   }
 }
 
@@ -262,35 +272,62 @@ async function handleSolveClickCaptcha(imageData) {
 }
 
 async function handleLoginComplete(success, tabId, message, userInitiated = false) {
-  await chrome.storage.local.set({ nju_auto_login_pending: false });
+  if (loginCompletionInProgress) return;
+  loginCompletionInProgress = true;
 
-  if (success) {
-    const data = await chrome.storage.local.get('nju_login_count');
-    const count = (data.nju_login_count || 0) + 1;
+  try {
     await chrome.storage.local.set({
-      nju_status: 'active',
-      nju_login_count: count
+      nju_auto_login_pending: false,
+      nju_auto_login_tab_id: null
     });
-    const triggerSource = userInitiated ? '页面触发' : '定时触发';
-    await addLog(`✅ 自动登录成功！(第 ${count} 次, ${triggerSource})`, 'success');
-  } else {
-    await chrome.storage.local.set({ nju_status: 'error' });
-    await addLog(`❌ 自动登录失败: ${message || '未知错误'}`, 'error');
-  }
 
-  // Only close the tab for extension-triggered logins (not user-initiated)
-  if (tabId && !userInitiated) {
-    setTimeout(async () => {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch (e) {
-        // Tab might already be closed
-      }
-    }, 3000);
-  }
+    if (success) {
+      const data = await chrome.storage.local.get('nju_login_count');
+      const count = (data.nju_login_count || 0) + 1;
+      await chrome.storage.local.set({
+        nju_status: 'active',
+        nju_login_count: count
+      });
+      const triggerSource = userInitiated ? '页面触发' : '定时触发';
+      await addLog(`✅ 自动登录成功！(第 ${count} 次, ${triggerSource})`, 'success');
+    } else {
+      await chrome.storage.local.set({ nju_status: 'error' });
+      await addLog(`❌ 自动登录失败: ${message || '未知错误'}`, 'error');
+    }
 
-  await scheduleNextAlarm();
+    // Only close the tab for extension-triggered logins (not user-initiated)
+    if (tabId && !userInitiated) {
+      setTimeout(async () => {
+        try {
+          await chrome.tabs.remove(tabId);
+        } catch (e) {
+          // Tab might already be closed
+        }
+      }, 3000);
+    }
+
+    await scheduleNextAlarm();
+  } finally {
+    loginCompletionInProgress = false;
+  }
 }
+
+// A full-page redirect ends the content script before it can always send
+// loginComplete. Treat a navigation away from the login page in our own tab
+// as successful immediately, so the popup status is updated without waiting
+// for the next scheduled check.
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const url = changeInfo.url || tab.url;
+  if (!url || url.includes('/authserver/login')) return;
+
+  const state = await chrome.storage.local.get([
+    'nju_auto_login_pending',
+    'nju_auto_login_tab_id'
+  ]);
+  if (state.nju_auto_login_pending && state.nju_auto_login_tab_id === tabId) {
+    await handleLoginComplete(true, tabId, '', false);
+  }
+});
 
 // --- Alarm listener ---
 chrome.alarms.onAlarm.addListener(async (alarm) => {
