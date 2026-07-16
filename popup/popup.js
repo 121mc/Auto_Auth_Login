@@ -6,8 +6,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const usernameInput = document.getElementById('username');
   const passwordInput = document.getElementById('password');
   const enableToggle = document.getElementById('enableToggle');
+  const pageAutoLoginToggle = document.getElementById('pageAutoLoginToggle');
   const saveBtn = document.getElementById('saveBtn');
-  const checkNowBtn = document.getElementById('checkNowBtn');
   const togglePasswordBtn = document.getElementById('togglePassword');
   const clearLogBtn = document.getElementById('clearLogBtn');
   const logArea = document.getElementById('logArea');
@@ -20,7 +20,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ----- Load saved settings -----
   const data = await chrome.storage.local.get([
-    'nju_username', 'nju_password', 'nju_enabled',
+    'nju_username', 'nju_password', 'nju_enabled', 'nju_page_auto_login',
     'nju_last_check', 'nju_next_check', 'nju_login_count',
     'nju_status', 'nju_logs'
   ]);
@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (data.nju_username) usernameInput.value = data.nju_username;
   if (data.nju_password) passwordInput.value = data.nju_password;
   enableToggle.checked = data.nju_enabled === true;
+  pageAutoLoginToggle.checked = data.nju_page_auto_login === true;
   loginCount.textContent = data.nju_login_count || 0;
 
   updateStatus(data.nju_status || 'idle');
@@ -48,6 +49,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const username = usernameInput.value.trim();
     const password = passwordInput.value;
     const enabled = enableToggle.checked;
+    const pageAutoLoginEnabled = pageAutoLoginToggle.checked;
 
     if (!username || !password) {
       showToast('请填写学号和密码', 'error');
@@ -58,6 +60,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       nju_username: username,
       nju_password: password,
       nju_enabled: enabled,
+      nju_page_auto_login: pageAutoLoginEnabled,
     });
 
     // Notify background to update alarm
@@ -67,13 +70,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     addLog('设置已保存' + (enabled ? '，自动登录已启用' : '，自动登录已禁用'));
   });
 
-  // ----- Check Now -----
-  checkNowBtn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ action: 'checkNow' });
-    showToast('正在检查登录状态...', 'success');
-    updateStatus('checking');
-    addLog('手动触发检查...');
-  });
 
   // ----- Clear logs -----
   clearLogBtn.addEventListener('click', async () => {

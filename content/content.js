@@ -48,11 +48,11 @@
 
   // --- Check if we should auto-login ---
   const data = await chrome.storage.local.get([
-    'nju_auto_login_pending', 'nju_username', 'nju_password', 'nju_enabled'
+    'nju_auto_login_pending', 'nju_username', 'nju_password', 'nju_page_auto_login'
   ]);
 
   const isPending = data.nju_auto_login_pending;
-  const isPageLogin = !isPending && data.nju_enabled;
+  const isPageLogin = !isPending && data.nju_page_auto_login === true;
 
   if (!isPending && !isPageLogin) {
     // Not triggered by our extension and auto-login not enabled, do nothing

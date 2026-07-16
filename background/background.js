@@ -117,28 +117,8 @@ async function performLogin() {
 
     await addLog(`已打开登录页面 (标签页 #${tab.id})`);
 
-    // The content script will handle the rest
-    // Set a timeout to close the tab if login doesn't complete
-    setTimeout(async () => {
-      try {
-        const pending = await chrome.storage.local.get('nju_auto_login_pending');
-        if (pending.nju_auto_login_pending) {
-          // Login didn't complete in time
-          await addLog('登录超时，关闭标签页', 'error');
-          await chrome.storage.local.set({
-            nju_auto_login_pending: false,
-            nju_status: 'error'
-          });
-          try {
-            await chrome.tabs.remove(tab.id);
-          } catch (e) {
-            // Tab might already be closed
-          }
-        }
-      } catch (e) {
-        // Ignore
-      }
-    }, 60000); // 60 second timeout
+    // The content script reports success or failure after its retry loop.
+    // handleLoginComplete then closes this extension-created tab.
 
   } catch (err) {
     await addLog(`打开登录页面失败: ${err.message}`, 'error');
@@ -177,15 +157,10 @@ async function ensureOffscreenDocument() {
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'updateSettings') {
-    handleUpdateSettings(message.enabled);
-    sendResponse({ ok: true });
-    return false;
-  }
-
-  if (message.action === 'checkNow') {
-    checkLoginStatus(true);
-    sendResponse({ ok: true });
-    return false;
+    handleUpdateSettings(message.enabled)
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
   }
 
   if (message.action === 'solveCaptcha') {
@@ -222,8 +197,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleUpdateSettings(enabled) {
   if (enabled) {
-    await scheduleNextAlarm();
     await addLog('自动登录已启用');
+    await checkLoginStatus();
   } else {
     await chrome.alarms.clear(ALARM_NAME);
     await chrome.storage.local.set({

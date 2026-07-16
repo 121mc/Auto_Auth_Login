@@ -437,11 +437,14 @@
     }
   }
 
-  // ---- Entry point: start after page is fully interactive ----
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run);
-  } else {
-    run();
-  }
+  // ---- Entry point: only run when front-page automation is enabled ----
+  chrome.storage.local.get('nju_page_auto_login').then(data => {
+    if (!data.nju_page_auto_login) return;
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', run);
+    } else {
+      run();
+    }
+  });
 
 })();
