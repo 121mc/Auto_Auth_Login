@@ -196,6 +196,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 
+  if (message.action === 'solveClickCaptcha') {
+    // Forward to offscreen document
+    handleSolveClickCaptcha(message.imageData)
+      .then(result => sendResponse({ result }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true; // Keep message channel open for async response
+  }
+
   if (message.action === 'loginComplete') {
     const tabId = sender.tab ? sender.tab.id : message.tabId;
     handleLoginComplete(message.success, tabId, message.message, message.userInitiated);
@@ -236,6 +244,32 @@ async function handleSolveCaptcha(imageData) {
 
     chrome.runtime.sendMessage(
       { action: 'offscreen_solveCaptcha', imageData },
+      (response) => {
+        clearTimeout(timeout);
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.error) {
+          reject(new Error(response.error));
+          return;
+        }
+        resolve(response.result);
+      }
+    );
+  });
+}
+
+async function handleSolveClickCaptcha(imageData) {
+  await ensureOffscreenDocument();
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('点击验证码识别超时'));
+    }, 30000);
+
+    chrome.runtime.sendMessage(
+      { action: 'offscreen_solveClickCaptcha', imageData },
       (response) => {
         clearTimeout(timeout);
         if (chrome.runtime.lastError) {

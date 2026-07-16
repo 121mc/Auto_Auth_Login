@@ -11,7 +11,8 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://authserver.nju.edu.cn/*"
+    "https://authserver.nju.edu.cn/*",
+    "https://xk.nju.edu.cn/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
@@ -23,6 +24,11 @@
     {
       "matches": ["https://authserver.nju.edu.cn/authserver/login*"],
       "js": ["content/content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://xk.nju.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"],
+      "js": ["content/content_xk.js"],
       "run_at": "document_idle"
     }
   ],
@@ -42,7 +48,8 @@
         "lib/ort-wasm-simd-threaded.wasm",
         "lib/ort-wasm-simd-threaded.mjs",
         "models/common_old.onnx",
-        "models/charset_old.json"
+        "models/charset_old.json",
+        "models/common_det.onnx"
       ],
       "matches": ["<all_urls>"]
     }
