@@ -209,6 +209,25 @@
     });
   }
 
+  function prewarmClickCaptchaModels() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { action: 'prewarmClickCaptcha' },
+        response => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (response && response.error) {
+            reject(new Error(response.error));
+            return;
+          }
+          resolve();
+        }
+      );
+    });
+  }
+
   // ---- Refresh the captcha by clicking the refresh icon ----
   function refreshCaptcha() {
     const refreshBtn = document.querySelector('.verify-refresh');
@@ -227,18 +246,62 @@
   }
 
   // ---- Wait for the captcha image to be fully loaded (src non-empty) ----
-  async function waitForCaptchaImage(timeout = 8000) {
+  function waitForCaptchaImage(timeout = 8000, previousSrc = null) {
     const img = document.getElementById('vcodeImg');
-    if (!img) throw new Error('找不到 #vcodeImg');
+    if (!img) return Promise.reject(new Error('找不到 #vcodeImg'));
 
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      if (img.src && img.src !== window.location.href && img.complete && img.naturalWidth > 0) {
-        return img;
+    return new Promise((resolve, reject) => {
+      let loadedAfterStart = false;
+      let settled = false;
+
+      const observer = new MutationObserver(check);
+      const timeoutId = setTimeout(() => finish(new Error('等待验证码图片超时')), timeout);
+
+      function isReady() {
+        const hasUsableImage = img.src
+          && img.src !== window.location.href
+          && img.complete
+          && img.naturalWidth > 0;
+        const isFresh = !previousSrc || img.src !== previousSrc || loadedAfterStart;
+        return hasUsableImage && isFresh;
       }
-      await delay(200);
-    }
-    throw new Error('等待验证码图片超时');
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        observer.disconnect();
+        img.removeEventListener('load', handleLoad);
+        img.removeEventListener('error', check);
+      }
+
+      function finish(error = null) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve(img);
+      }
+
+      function handleLoad() {
+        loadedAfterStart = true;
+        check();
+      }
+
+      function check() {
+        if (isReady()) finish();
+      }
+
+      observer.observe(img, { attributes: true, attributeFilter: ['src'] });
+      img.addEventListener('load', handleLoad);
+      img.addEventListener('error', check);
+      check();
+    });
+  }
+
+  function refreshCaptchaAndWait(timeout = 8000) {
+    const img = document.getElementById('vcodeImg');
+    const previousSrc = img ? img.src : null;
+    refreshCaptcha();
+    return waitForCaptchaImage(timeout, previousSrc);
   }
 
   // ---- Detect whether a wrong-captcha error is visible ----
@@ -262,6 +325,11 @@
     return false;
   }
 
+  function isInferenceEngineError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /ERROR_CODE|output tensor|non-tensor|ONNX|WASM|worker/i.test(message);
+  }
+
   // ---- Detect whether the "select round" confirmation dialog appeared ----
   function findConfirmButton() {
     // Try exact selector first
@@ -278,29 +346,75 @@
     return null;
   }
 
-  async function waitForConfirmButton(timeout = 5000) {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      const confirmButton = findConfirmButton();
-      if (confirmButton) return confirmButton;
-      if (isCaptchaError()) return null;
-      await delay(50);
-    }
-    return null;
+  function waitForConfirmButton(timeout = 5000) {
+    return new Promise(resolve => {
+      let settled = false;
+      let observer;
+      let timeoutId;
+
+      function finish(button) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        observer.disconnect();
+        resolve(button);
+      }
+
+      function check() {
+        const confirmButton = findConfirmButton();
+        if (confirmButton) finish(confirmButton);
+        else if (isCaptchaError()) finish(null);
+      }
+
+      observer = new MutationObserver(check);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        characterData: true,
+        attributeFilter: ['class', 'style', 'disabled']
+      });
+      timeoutId = setTimeout(() => finish(null), timeout);
+      check();
+    });
   }
 
-  async function clickCourseButton(timeout = 10000) {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      const courseButton = document.getElementById('courseBtn');
-      if (courseButton && !courseButton.disabled && courseButton.offsetParent !== null) {
-        courseButton.click();
-        log('✅ 已点击“开始选课”按钮');
-        return;
+  function clickCourseButton(timeout = 10000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let observer;
+      let timeoutId;
+
+      function finish(error = null) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        observer.disconnect();
+        if (error) reject(error);
+        else resolve();
       }
-      await delay(50);
-    }
-    throw new Error('确认轮次后未找到可点击的“开始选课”按钮');
+
+      function check() {
+        const courseButton = document.getElementById('courseBtn');
+        if (courseButton && !courseButton.disabled && courseButton.offsetParent !== null) {
+          courseButton.click();
+          log('✅ 已点击“开始选课”按钮');
+          finish();
+        }
+      }
+
+      observer = new MutationObserver(check);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'disabled']
+      });
+      timeoutId = setTimeout(() => {
+        finish(new Error('确认轮次后未找到可点击的“开始选课”按钮'));
+      }, timeout);
+      check();
+    });
   }
 
   async function confirmRoundAndStartCourse(confirmButton) {
@@ -316,12 +430,17 @@
     log('选课页面自动化启动');
 
     try {
-      // Fill credentials and wait for the captcha concurrently.
-      log('正在并行填充账号密码并等待验证码...');
+      // Fill credentials, warm models, and wait for the captcha concurrently.
+      log('正在并行填充账号密码、预热模型并等待验证码...');
       const credentialsPromise = fillLoginCredentials();
+      const modelWarmupPromise = prewarmClickCaptchaModels();
       const captchaPromise = waitForCaptchaImage(15000);
-      const [credentials] = await Promise.all([credentialsPromise, captchaPromise]);
-      log('验证码图片已就绪');
+      const [credentials] = await Promise.all([
+        credentialsPromise,
+        modelWarmupPromise,
+        captchaPromise
+      ]);
+      log('验证码图片和识别模型已就绪');
 
       while (retryCount < MAX_RETRIES) {
         retryCount++;
@@ -351,7 +470,7 @@
             const displayedPoint = simulateClick(imgEl, x, adjustedY);
             displayedPoints.push(displayedPoint);
             log(`点击第 ${i + 1} 个字符: 原图(${x}, ${adjustedY})，页面(${displayedPoint.x}, ${displayedPoint.y})`);
-            await delay(40);
+            if (i < coords.length - 1) await delay(10);
           }
 
           // The site submits sessionStorage.verifyResult.  Normally the native
@@ -368,7 +487,6 @@
           }
 
           log('验证码点击完成，准备登录...');
-          await delay(60);
 
           // 5. Click the login button
           const loginBtn = document.getElementById('studentLoginBtn');
@@ -396,9 +514,7 @@
           // Check if captcha was wrong
           if (isCaptchaError()) {
             log('❌ 验证码错误，刷新后重试...', 'warn');
-            refreshCaptcha();
-            await delay(300);
-            await waitForCaptchaImage(8000);
+            await refreshCaptchaAndWait(8000);
             continue;
           }
 
@@ -413,16 +529,16 @@
 
           // Still nothing – assume wrong captcha, refresh and retry
           log('⚠️ 未检测到明确结果，刷新验证码重试...', 'warn');
-          refreshCaptcha();
-          await delay(300);
-          await waitForCaptchaImage(8000);
+          await refreshCaptchaAndWait(8000);
 
         } catch (err) {
+          if (isInferenceEngineError(err)) {
+            log(`验证码识别引擎错误，停止自动化: ${err.message}`, 'error');
+            return;
+          }
           log(`本次尝试失败: ${err.message}，刷新验证码重试...`, 'warn');
-          refreshCaptcha();
-          await delay(300);
           try {
-            await waitForCaptchaImage(8000);
+            await refreshCaptchaAndWait(8000);
           } catch (_) {
             log('等待验证码超时，继续...', 'warn');
           }

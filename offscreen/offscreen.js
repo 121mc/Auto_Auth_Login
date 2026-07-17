@@ -445,8 +445,6 @@
       let bestScore = -Infinity;
       for (let step = 0; step < seqLen; step++) {
         const base = step * numClasses;
-        // Target-vs-blank logit scoring works better for constrained matching
-        // than requiring the target to beat all 8210 possible characters.
         const score = outputData[base + targetIndex] - outputData[base];
         if (score > bestScore) bestScore = score;
       }
@@ -454,45 +452,32 @@
     });
   }
 
-  async function scoreRotatedCandidate(candidateImage, targetIndices, angles) {
+  async function scoreRotatedCandidateSerial(candidateImage, targetIndices, angles) {
     const bestScores = targetIndices.map(() => -Infinity);
     const bestAngles = targetIndices.map(() => 0);
-    const results = new Array(angles.length);
-    const concurrency = Math.min(4, angles.length);
-    let nextIndex = 0;
 
-    async function worker() {
-      while (true) {
-        const index = nextIndex++;
-        if (index >= angles.length) return;
-
-        const angle = angles[index];
-        const rotated = rotateImageData(candidateImage, angle);
-        const inference = await runOcrInference(rotated);
-        results[index] = {
-          angle,
-          scores: scoreTargetsFromOutput(
-            inference.outputData,
-            inference.numClasses,
-            inference.seqLen,
-            targetIndices
-          )
-        };
-      }
-    }
-
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
-
-    for (const result of results) {
-      for (let targetIndex = 0; targetIndex < result.scores.length; targetIndex++) {
-        if (result.scores[targetIndex] > bestScores[targetIndex]) {
-          bestScores[targetIndex] = result.scores[targetIndex];
-          bestAngles[targetIndex] = result.angle;
+    for (const angle of angles) {
+      const rotated = rotateImageData(candidateImage, angle);
+      const inference = await runOcrInference(rotated);
+      const scores = scoreTargetsFromOutput(
+        inference.outputData,
+        inference.numClasses,
+        inference.seqLen,
+        targetIndices
+      );
+      for (let targetIndex = 0; targetIndex < scores.length; targetIndex++) {
+        if (scores[targetIndex] > bestScores[targetIndex]) {
+          bestScores[targetIndex] = scores[targetIndex];
+          bestAngles[targetIndex] = angle;
         }
       }
     }
 
     return { scores: bestScores, angles: bestAngles };
+  }
+
+  async function scoreRotatedCandidate(candidateImage, targetIndices, angles) {
+    return scoreRotatedCandidateSerial(candidateImage, targetIndices, angles);
   }
 
   function findBestTargetAssignment(candidates, targetCount) {
@@ -577,7 +562,7 @@
     // 5. Score every box against only the four requested characters while
     // rotating each crop to compensate for random glyph orientation.
     const coarseAngles = [];
-    for (let angle = 0; angle < 360; angle += 20) coarseAngles.push(angle);
+    for (let angle = 0; angle < 360; angle += 15) coarseAngles.push(angle);
     const rotationCandidates = [];
 
     for (const box of mainBoxes) {
@@ -608,12 +593,12 @@
       });
     }
 
-    // Refine ±15° around each best coarse angle.
+    // Refine ±5° around each best coarse angle.
     for (const candidate of rotationCandidates) {
       const refineAngles = new Set();
       for (const angle of candidate.angles) {
-        refineAngles.add((angle + 345) % 360);
-        refineAngles.add((angle + 15) % 360);
+        refineAngles.add((angle + 355) % 360);
+        refineAngles.add((angle + 5) % 360);
       }
       const refined = await scoreRotatedCandidate(
         candidate.imageData,
@@ -712,6 +697,16 @@
 
   // --- Message listener ---
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'offscreen_prewarmClickCaptcha') {
+      Promise.all([loadCharset(), loadOcrSession(), loadDetSession()])
+        .then(() => sendResponse({ ok: true }))
+        .catch(err => {
+          console.error('[ONNX] Click captcha prewarm failed:', err);
+          sendResponse({ error: err.message });
+        });
+      return true;
+    }
+
     if (message.action === 'offscreen_solveCaptcha') {
       solveCaptcha(message.imageData, false)
         .then(result => {
