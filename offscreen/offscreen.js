@@ -457,21 +457,37 @@
   async function scoreRotatedCandidate(candidateImage, targetIndices, angles) {
     const bestScores = targetIndices.map(() => -Infinity);
     const bestAngles = targetIndices.map(() => 0);
+    const results = new Array(angles.length);
+    const concurrency = Math.min(4, angles.length);
+    let nextIndex = 0;
 
-    for (const angle of angles) {
-      const rotated = rotateImageData(candidateImage, angle);
-      const inference = await runOcrInference(rotated);
-      const scores = scoreTargetsFromOutput(
-        inference.outputData,
-        inference.numClasses,
-        inference.seqLen,
-        targetIndices
-      );
+    async function worker() {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= angles.length) return;
 
-      for (let targetIndex = 0; targetIndex < scores.length; targetIndex++) {
-        if (scores[targetIndex] > bestScores[targetIndex]) {
-          bestScores[targetIndex] = scores[targetIndex];
-          bestAngles[targetIndex] = angle;
+        const angle = angles[index];
+        const rotated = rotateImageData(candidateImage, angle);
+        const inference = await runOcrInference(rotated);
+        results[index] = {
+          angle,
+          scores: scoreTargetsFromOutput(
+            inference.outputData,
+            inference.numClasses,
+            inference.seqLen,
+            targetIndices
+          )
+        };
+      }
+    }
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+    for (const result of results) {
+      for (let targetIndex = 0; targetIndex < result.scores.length; targetIndex++) {
+        if (result.scores[targetIndex] > bestScores[targetIndex]) {
+          bestScores[targetIndex] = result.scores[targetIndex];
+          bestAngles[targetIndex] = result.angle;
         }
       }
     }
@@ -561,7 +577,7 @@
     // 5. Score every box against only the four requested characters while
     // rotating each crop to compensate for random glyph orientation.
     const coarseAngles = [];
-    for (let angle = 0; angle < 360; angle += 45) coarseAngles.push(angle);
+    for (let angle = 0; angle < 360; angle += 20) coarseAngles.push(angle);
     const rotationCandidates = [];
 
     for (const box of mainBoxes) {
