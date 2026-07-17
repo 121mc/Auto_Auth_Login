@@ -76,8 +76,30 @@
     };
   }
 
-  // ---- Get the captcha image as a base64 Data URL ----
-  function getCaptchaImageBase64() {
+  function getCaptchaImageFingerprint(img) {
+    if (!img || !img.complete || img.naturalWidth <= 0) return null;
+
+    try {
+      // Detect replacements even when the site reuses the same image URL.
+      const canvas = document.createElement('canvas');
+      canvas.width = 16;
+      canvas.height = 16;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let hash = 2166136261;
+      for (let i = 0; i < pixels.length; i++) {
+        hash ^= pixels[i];
+        hash = Math.imul(hash, 16777619);
+      }
+      return `${img.naturalWidth}x${img.naturalHeight}:${hash >>> 0}`;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ---- Capture exactly the captcha currently displayed on the page ----
+  function getCaptchaImageSnapshot(timeout = 5000) {
     return new Promise((resolve, reject) => {
       const img = document.getElementById('vcodeImg');
       if (!img || !img.src || img.src === window.location.href) {
@@ -85,27 +107,44 @@
         return;
       }
 
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
+      let settled = false;
+      const timeoutId = setTimeout(() => finish(new Error('读取验证码图片超时')), timeout);
 
-      if (img.complete && img.naturalWidth > 0) {
+      function cleanup() {
+        clearTimeout(timeoutId);
+        img.removeEventListener('load', capture);
+        img.removeEventListener('error', handleError);
+      }
+
+      function finish(error = null, snapshot = null) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve(snapshot);
+      }
+
+      function handleError() {
+        finish(new Error('验证码图片加载失败'));
+      }
+
+      function capture() {
+        if (!img.complete || img.naturalWidth <= 0) return;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
         canvas.width = img.naturalWidth;
         canvas.height = img.naturalHeight;
         ctx.drawImage(img, 0, 0);
-        resolve(canvas.toDataURL('image/png'));
-      } else {
-        // Image not yet loaded
-        const tmpImg = new Image();
-        tmpImg.crossOrigin = 'anonymous';
-        tmpImg.onload = () => {
-          canvas.width = tmpImg.naturalWidth;
-          canvas.height = tmpImg.naturalHeight;
-          ctx.drawImage(tmpImg, 0, 0);
-          resolve(canvas.toDataURL('image/png'));
-        };
-        tmpImg.onerror = () => reject(new Error('验证码图片加载失败'));
-        tmpImg.src = img.src + (img.src.includes('?') ? '&' : '?') + '_t=' + Date.now();
+        finish(null, {
+          imageBase64: canvas.toDataURL('image/png'),
+          src: img.currentSrc || img.src,
+          fingerprint: getCaptchaImageFingerprint(img)
+        });
       }
+
+      img.addEventListener('load', capture);
+      img.addEventListener('error', handleError);
+      capture();
     });
   }
 
@@ -246,7 +285,7 @@
   }
 
   // ---- Wait for the captcha image to be fully loaded (src non-empty) ----
-  function waitForCaptchaImage(timeout = 8000, previousSrc = null) {
+  function waitForCaptchaImage(timeout = 8000, previousState = null, trigger = null) {
     const img = document.getElementById('vcodeImg');
     if (!img) return Promise.reject(new Error('找不到 #vcodeImg'));
 
@@ -255,6 +294,7 @@
       let settled = false;
 
       const observer = new MutationObserver(check);
+      const pollId = setInterval(check, 100);
       const timeoutId = setTimeout(() => finish(new Error('等待验证码图片超时')), timeout);
 
       function isReady() {
@@ -262,12 +302,18 @@
           && img.src !== window.location.href
           && img.complete
           && img.naturalWidth > 0;
-        const isFresh = !previousSrc || img.src !== previousSrc || loadedAfterStart;
+        const currentSrc = img.currentSrc || img.src;
+        const currentFingerprint = getCaptchaImageFingerprint(img);
+        const isFresh = !previousState
+          || currentSrc !== previousState.src
+          || loadedAfterStart
+          || (currentFingerprint && currentFingerprint !== previousState.fingerprint);
         return hasUsableImage && isFresh;
       }
 
       function cleanup() {
         clearTimeout(timeoutId);
+        clearInterval(pollId);
         observer.disconnect();
         img.removeEventListener('load', handleLoad);
         img.removeEventListener('error', check);
@@ -293,15 +339,20 @@
       observer.observe(img, { attributes: true, attributeFilter: ['src'] });
       img.addEventListener('load', handleLoad);
       img.addEventListener('error', check);
+      // Install freshness listeners before asking the page to refresh. A cached
+      // captcha can otherwise finish loading before we observe it.
+      if (trigger) trigger();
       check();
     });
   }
 
   function refreshCaptchaAndWait(timeout = 8000) {
     const img = document.getElementById('vcodeImg');
-    const previousSrc = img ? img.src : null;
-    refreshCaptcha();
-    return waitForCaptchaImage(timeout, previousSrc);
+    const previousState = img ? {
+      src: img.currentSrc || img.src,
+      fingerprint: getCaptchaImageFingerprint(img)
+    } : null;
+    return waitForCaptchaImage(timeout, previousState, refreshCaptcha);
   }
 
   // ---- Detect whether a wrong-captcha error is visible ----
@@ -451,15 +502,25 @@
           const imgEl = document.getElementById('vcodeImg');
           if (!imgEl) throw new Error('找不到 #vcodeImg');
 
-          const imageBase64 = await getCaptchaImageBase64();
+          const captchaSnapshot = await getCaptchaImageSnapshot();
           log('已获取验证码图片数据');
 
           // 3. Call offscreen to solve the click-captcha
           log('正在识别验证码...');
-          const coords = await solveClickCaptcha(imageBase64);
+          const coords = await solveClickCaptcha(captchaSnapshot.imageBase64);
           log(`识别成功，点击坐标: ${JSON.stringify(coords)}`);
           if (!Array.isArray(coords) || coords.length !== 4) {
             throw new Error(`验证码识别结果无效: ${JSON.stringify(coords)}`);
+          }
+
+          // Never apply coordinates calculated from an older captcha.
+          const currentSrc = imgEl.currentSrc || imgEl.src;
+          const currentFingerprint = getCaptchaImageFingerprint(imgEl);
+          const captchaChanged = currentSrc !== captchaSnapshot.src
+            || (captchaSnapshot.fingerprint && currentFingerprint
+                && currentFingerprint !== captchaSnapshot.fingerprint);
+          if (captchaChanged) {
+            throw new Error('验证码图片在识别期间已更新，已丢弃旧识别结果');
           }
 
           // 4. Click each coordinate in order on the captcha image
