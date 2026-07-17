@@ -43,6 +43,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   togglePasswordBtn.addEventListener('click', () => {
     const isPassword = passwordInput.type === 'password';
     passwordInput.type = isPassword ? 'text' : 'password';
+    togglePasswordBtn.setAttribute('aria-label', isPassword ? '隐藏密码' : '显示密码');
     togglePasswordBtn.querySelector('.eye-open').style.display = isPassword ? 'none' : 'block';
     togglePasswordBtn.querySelector('.eye-closed').style.display = isPassword ? 'block' : 'none';
   });
@@ -104,7 +105,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ----- Clear logs -----
-  clearLogBtn.addEventListener('click', async () => {
+  clearLogBtn.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     await chrome.storage.local.set({ nju_logs: [] });
     renderLogs([]);
   });

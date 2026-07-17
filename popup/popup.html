@@ -1,1 +1,65 @@
-<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NJU Auto Auth Login</title><link rel="stylesheet" href="popup.css"><body><main class="container"><header class="header"><div class="brand"><img src="../icons/icon128.png"><div><h1>NJU 自动认证</h1><p>统一身份认证助手</p></div></div><div class="status-card" id="statusCard"><div class="status-indicator"><i class="status-dot" id="statusDot"></i><b class="status-text" id="statusText">未配置</b></div><small>下次检查 <strong id="nextCheckTime">-</strong></small></div></header><section class="form-section"><div class="form-group"><label for="username">学号 / 工号</label><input id="username" placeholder="请输入学号或工号" autocomplete="off"></div><div class="form-group"><label for="password">密码</label><input type="password" id="password" placeholder="请输入密码" autocomplete="off"><button class="toggle-password" id="togglePassword" type="button"><span class="eye-open">◉</span><span class="eye-closed" style="display:none">○</span></button></div><button class="btn" id="saveBtn">保存学号和密码</button><div class="settings-card"><div class="auth-settings"><div class="toggle-row"><div><label for="authAutoLoginToggle">统一身份认证自动登录</label><span>访问认证页时自动完成登录</span></div><label class="toggle-switch"><input type="checkbox" id="authAutoLoginToggle"><i></i></label></div><div class="toggle-row toggle-row-child" id="periodicCheckRow"><div><label for="periodicCheckToggle">定时检查登录情况</label><span>定期保持登录状态有效</span></div><label class="toggle-switch"><input type="checkbox" id="periodicCheckToggle"><i></i></label></div></div><div class="toggle-row"><div><label for="courseAutoLoginToggle">选课页面自动登录</label><span>进入选课系统时自动登录</span></div><label class="toggle-switch"><input type="checkbox" id="courseAutoLoginToggle"><i></i></label></div></div></section><section class="log-section"><div class="log-header">运行日志 <button class="btn-clear" id="clearLogBtn">清空</button></div><div class="log-area" id="logArea"><div class="log-empty">暂无日志</div></div></section></main><script src="popup.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NJU Auto Auth Login</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <div class="brand">
+        <img src="../icons/icon128.png" alt="">
+        <div><h1>NJU 自动认证</h1><p>统一身份认证助手</p></div>
+      </div>
+      <div class="status-card" id="statusCard" role="status">
+        <div class="status-indicator"><i class="status-dot" id="statusDot"></i><b class="status-text" id="statusText">未配置</b></div>
+        <small>下次检查 <strong id="nextCheckTime">-</strong></small>
+      </div>
+    </header>
+
+    <section class="panel account-panel" aria-labelledby="accountTitle">
+      <div class="section-heading">
+        <div><h2 id="accountTitle">登录信息</h2></div>
+      </div>
+      <div class="credential-grid">
+        <div class="form-group"><label for="username">学号 / 工号</label><input id="username" placeholder="请输入账号" autocomplete="off"></div>
+        <div class="form-group password-group">
+          <label for="password">密码</label><input type="password" id="password" placeholder="请输入密码" autocomplete="off">
+          <button class="toggle-password" id="togglePassword" type="button" aria-label="显示密码">
+            <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5Z"/><circle cx="12" cy="12" r="2.3"/></svg>
+            <svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true" style="display:none"><path d="m4 4 16 16M9.7 7.3A10.8 10.8 0 0 1 12 7c6 0 9.5 5 9.5 5a15.6 15.6 0 0 1-2.2 2.6M6.3 9A16.6 16.6 0 0 0 2.5 12s3.5 5 9.5 5c1 0 1.9-.1 2.7-.4"/></svg>
+          </button>
+        </div>
+      </div>
+      <button class="primary-btn" id="saveBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 16h8"/></svg>保存登录信息</button>
+    </section>
+
+    <section class="panel settings-card" aria-labelledby="automationTitle">
+      <div class="section-heading compact-heading"><div><h2 id="automationTitle">自动化设置</h2><p>更改后立即生效</p></div></div>
+      <div class="toggle-row">
+        <div class="setting-copy"><label for="authAutoLoginToggle">统一身份认证</label><span>访问认证页时自动登录</span></div>
+        <label class="toggle-switch" aria-label="统一身份认证自动登录"><input type="checkbox" id="authAutoLoginToggle"><i></i></label>
+      </div>
+      <div class="toggle-row toggle-row-child" id="periodicCheckRow">
+        <div class="setting-copy"><label for="periodicCheckToggle">定时保持登录</label><span>后台定期检查登录状态</span></div>
+        <label class="toggle-switch" aria-label="定时检查登录情况"><input type="checkbox" id="periodicCheckToggle"><i></i></label>
+      </div>
+      <div class="toggle-row">
+        <div class="setting-copy"><label for="courseAutoLoginToggle">选课系统</label><span>进入选课页面时自动登录</span></div>
+        <label class="toggle-switch" aria-label="选课页面自动登录"><input type="checkbox" id="courseAutoLoginToggle"><i></i></label>
+      </div>
+    </section>
+
+    <section class="panel log-section">
+      <div class="log-header">
+        <span class="log-title"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 9h8M8 12h8M8 15h5"/></svg>运行日志</span>
+        <span class="log-actions"><button class="btn-clear" id="clearLogBtn" type="button">清空</button></span>
+      </div>
+      <div class="log-area" id="logArea"><div class="log-empty">暂无日志</div></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
