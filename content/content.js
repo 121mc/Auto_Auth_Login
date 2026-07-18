@@ -256,7 +256,15 @@
       try {
         captchaResult = await new Promise((resolve, reject) => {
           chrome.runtime.sendMessage(
-            { action: 'solveCaptcha', imageData: captchaImageData },
+            {
+              action: 'solveCaptcha',
+              imageData: captchaImageData,
+              debugContext: {
+                attempt,
+                pageUrl: window.location.href,
+                imageUrl: captchaImg.currentSrc || captchaImg.src
+              }
+            },
             (response) => {
               if (chrome.runtime.lastError) {
                 reject(new Error(chrome.runtime.lastError.message));

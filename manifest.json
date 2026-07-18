@@ -1,14 +1,15 @@
 ﻿{
   "manifest_version": 3,
   "name": "NJU Auto Auth Login",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "自动监控南京大学统一身份认证登录状态，过期时自动重新登录",
   "permissions": [
     "storage",
     "alarms",
     "offscreen",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://authserver.nju.edu.cn/*",

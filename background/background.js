@@ -5,6 +5,8 @@
 const ALARM_NAME = 'nju_auth_check';
 const LOGIN_URL = 'https://authserver.nju.edu.cn/authserver/login';
 const REDIRECT_URL = 'https://authserver.nju.edu.cn/personalInfo/personCenter/index.html';
+const DEBUG_PAGE_URL = chrome.runtime.getURL('debug/debug.html');
+const DEBUG_RECORD_PREFIX = 'nju_debug_record_';
 let loginCompletionInProgress = false;
 
 // --- Logging Helper ---
@@ -166,6 +168,13 @@ async function ensureOffscreenDocument() {
 
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'enableDebugMode') {
+    enableDebugMode()
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === 'updateSettings') {
     handleUpdateSettings(message.enabled)
       .then(() => sendResponse({ ok: true }))
@@ -175,7 +184,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'solveCaptcha') {
     // Forward to offscreen document
-    handleSolveCaptcha(message.imageData)
+    handleSolveCaptcha(message.imageData, message.debugContext)
       .then(result => sendResponse({ result }))
       .catch(err => sendResponse({ error: err.message }));
     return true; // Keep message channel open for async response
@@ -190,7 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'solveClickCaptcha') {
     // Forward to offscreen document
-    handleSolveClickCaptcha(message.imageData)
+    handleSolveClickCaptcha(message.imageData, message.debugContext)
       .then(result => sendResponse({ result }))
       .catch(err => sendResponse({ error: err.message }));
     return true; // Keep message channel open for async response
@@ -212,6 +221,96 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+async function clearDebugRecords() {
+  const allData = await chrome.storage.local.get(null);
+  const recordKeys = Object.keys(allData).filter(key => key.startsWith(DEBUG_RECORD_PREFIX));
+  if (recordKeys.length > 0) {
+    await chrome.storage.local.remove(recordKeys);
+  }
+}
+
+async function openDebugPage() {
+  const state = await chrome.storage.local.get('nju_debug_tab_id');
+  if (Number.isInteger(state.nju_debug_tab_id)) {
+    try {
+      const tab = await chrome.tabs.get(state.nju_debug_tab_id);
+      if (tab.url === DEBUG_PAGE_URL) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId !== undefined) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        return tab;
+      }
+    } catch (_) {
+      // The previous Debug tab was closed; create a fresh one below.
+    }
+  }
+
+  const tab = await chrome.tabs.create({ url: DEBUG_PAGE_URL, active: true });
+  await chrome.storage.local.set({ nju_debug_tab_id: tab.id });
+  return tab;
+}
+
+async function enableDebugMode() {
+  await clearDebugRecords();
+  await chrome.storage.local.set({
+    nju_debug_mode: true,
+    nju_debug_session_id: crypto.randomUUID(),
+    nju_debug_started_at: Date.now()
+  });
+  await openDebugPage();
+  await addLog('Debug 记录页已打开，开始记录验证码识别详情');
+}
+
+async function recordCaptchaDebug({
+  captchaType,
+  imageData,
+  result,
+  error,
+  startedAt,
+  context,
+  debugDetails
+}) {
+  const debugState = await chrome.storage.local.get([
+    'nju_debug_mode',
+    'nju_debug_session_id'
+  ]);
+  if (!debugState.nju_debug_mode || !debugState.nju_debug_session_id) return;
+
+  const finishedAt = Date.now();
+  const id = crypto.randomUUID();
+  const record = {
+    id,
+    sessionId: debugState.nju_debug_session_id,
+    captchaType,
+    source: captchaType === 'click' ? '选课系统' : '统一身份认证',
+    imageData,
+    result: result ?? null,
+    status: error ? 'error' : 'success',
+    error: error || '',
+    startedAt,
+    finishedAt,
+    durationMs: finishedAt - startedAt,
+    context: context && typeof context === 'object' ? context : {},
+    debugDetails: debugDetails && typeof debugDetails === 'object' ? debugDetails : null
+  };
+
+  // Store every recognition under an independent key. This avoids rewriting a
+  // growing image history and prevents concurrent recognitions from overwriting
+  // one another.
+  await chrome.storage.local.set({ [`${DEBUG_RECORD_PREFIX}${id}`]: record });
+}
+
+async function safelyRecordCaptchaDebug(details) {
+  try {
+    await recordCaptchaDebug(details);
+  } catch (err) {
+    // Debug instrumentation must never turn an otherwise valid recognition
+    // into a failed login attempt.
+    console.error('[NJU Auth][debug] 保存验证码调试记录失败:', err);
+  }
+}
+
 async function handleUpdateSettings(enabled) {
   if (enabled) {
     await addLog('定时检查已启用');
@@ -226,30 +325,42 @@ async function handleUpdateSettings(enabled) {
   }
 }
 
-async function handleSolveCaptcha(imageData) {
-  await ensureOffscreenDocument();
+async function handleSolveCaptcha(imageData, debugContext = {}) {
+  const startedAt = Date.now();
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('验证码识别超时'));
-    }, 30000);
+  try {
+    await ensureOffscreenDocument();
+    const result = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('验证码识别超时'));
+      }, 30000);
 
-    chrome.runtime.sendMessage(
-      { action: 'offscreen_solveCaptcha', imageData },
-      (response) => {
-        clearTimeout(timeout);
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
+      chrome.runtime.sendMessage(
+        { action: 'offscreen_solveCaptcha', imageData },
+        (response) => {
+          clearTimeout(timeout);
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (response && response.error) {
+            reject(new Error(response.error));
+            return;
+          }
+          resolve(response.result);
         }
-        if (response && response.error) {
-          reject(new Error(response.error));
-          return;
-        }
-        resolve(response.result);
-      }
-    );
-  });
+      );
+    });
+    await safelyRecordCaptchaDebug({
+      captchaType: 'text', imageData, result, startedAt, context: debugContext
+    });
+    return result;
+  } catch (err) {
+    await safelyRecordCaptchaDebug({
+      captchaType: 'text', imageData, error: err.message, startedAt, context: debugContext
+    });
+    throw err;
+  }
 }
 
 async function handlePrewarmClickCaptcha() {
@@ -278,30 +389,63 @@ async function handlePrewarmClickCaptcha() {
   });
 }
 
-async function handleSolveClickCaptcha(imageData) {
-  await ensureOffscreenDocument();
+async function handleSolveClickCaptcha(imageData, debugContext = {}) {
+  const startedAt = Date.now();
+  const debugState = await chrome.storage.local.get('nju_debug_mode');
+  const captureDebug = debugState.nju_debug_mode === true;
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('点击验证码识别超时'));
-    }, 60000);
+  try {
+    await ensureOffscreenDocument();
+    const output = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('点击验证码识别超时'));
+      }, 60000);
 
-    chrome.runtime.sendMessage(
-      { action: 'offscreen_solveClickCaptcha', imageData },
-      (response) => {
-        clearTimeout(timeout);
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
+      chrome.runtime.sendMessage(
+        { action: 'offscreen_solveClickCaptcha', imageData, captureDebug },
+        (response) => {
+          clearTimeout(timeout);
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (response && response.error) {
+            const error = new Error(response.error);
+            error.debugDetails = response.debugDetails || null;
+            reject(error);
+            return;
+          }
+          if (!response) {
+            reject(new Error('点击验证码识别未返回结果'));
+            return;
+          }
+          resolve({
+            result: response.result,
+            debugDetails: response.debugDetails || null
+          });
         }
-        if (response && response.error) {
-          reject(new Error(response.error));
-          return;
-        }
-        resolve(response.result);
-      }
-    );
-  });
+      );
+    });
+    await safelyRecordCaptchaDebug({
+      captchaType: 'click',
+      imageData,
+      result: output.result,
+      startedAt,
+      context: debugContext,
+      debugDetails: output.debugDetails
+    });
+    return output.result;
+  } catch (err) {
+    await safelyRecordCaptchaDebug({
+      captchaType: 'click',
+      imageData,
+      error: err.message,
+      startedAt,
+      context: debugContext,
+      debugDetails: err.debugDetails
+    });
+    throw err;
+  }
 }
 
 async function handleLoginComplete(success, tabId, message, userInitiated = false) {

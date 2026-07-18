@@ -126,12 +126,20 @@
   }
 
   // --- Solve OCR captcha ---
-  async function solveCaptcha(imageDataBase64, isChinese = false) {
+  async function solveCaptcha(imageDataBase64, isChinese = false, includeDebugDetails = false) {
     const imageData = await decodeImage(imageDataBase64);
     console.log(`[ONNX OCR] Input image: ${imageData.width}x${imageData.height}, isChinese: ${isChinese}`);
 
     const { outputData, numClasses, seqLen } = await runOcrInference(imageData);
-    if (seqLen === 0) return '';
+    if (seqLen === 0) {
+      return includeDebugDetails ? {
+        modelDecodedResult: '',
+        cleanedResult: '',
+        sequenceLength: 0,
+        predictedIndices: [],
+        decodedIndices: []
+      } : '';
+    }
 
     const predictedIndices = [];
     for (let i = 0; i < seqLen; i++) {
@@ -172,6 +180,15 @@
       : result.trim().replace(/[^a-zA-Z0-9]/g, '');
 
     console.log(`[ONNX OCR] Raw: "${result}", Cleaned: "${cleaned}"`);
+    if (includeDebugDetails) {
+      return {
+        modelDecodedResult: result.trim(),
+        cleanedResult: cleaned,
+        sequenceLength: seqLen,
+        predictedIndices,
+        decodedIndices
+      };
+    }
     return cleaned;
   }
 
@@ -338,7 +355,9 @@
 
     const finalBoxes = nms(candidateBoxes, nmsThr);
     console.log(`[ONNX Det] Found ${finalBoxes.length} objects after NMS`);
-    return finalBoxes.map(b => b.slice(0, 4));
+    // Preserve score and class id for Debug mode. Callers that only need the
+    // rectangle continue to destructure the first four values.
+    return finalBoxes.map(box => box.slice());
   }
 
   // --- Crop a region from ImageData and return as Base64 ---
@@ -377,6 +396,14 @@
     const ctx = canvas.getContext('2d');
     ctx.drawImage(source, left, top, width, height, 0, 0, width, height);
     return ctx.getImageData(0, 0, width, height);
+  }
+
+  function imageDataToBase64(imageData) {
+    const canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    canvas.getContext('2d').putImageData(imageData, 0, 0);
+    return canvas.toDataURL('image/png');
   }
 
   function getImageBackgroundColor(imageData) {
@@ -419,25 +446,36 @@
     return ctx.getImageData(0, 0, diagonal, diagonal);
   }
 
-  function extractClickTargets(ocrText) {
-    const chinese = ocrText.replace(/[^\u4e00-\u9fff]/g, '');
-    const markers = ['依次点击', '点击', '击', '点'];
+  function cleanClickTargetText(ocrText) {
+    const isHanCharacter = char => /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u.test(char);
+    const edgeArtifacts = new Set([
+      '飞', '丫', '依', '次', '点', '击', '放', '下', '谈', '百', '了', '工', '亡',
+      '已', '己'
+    ]);
+    const chineseCharacters = Array.from(ocrText || '').filter(isHanCharacter);
+    const remainingCharacters = chineseCharacters.slice();
+    const removedLeadingArtifacts = [];
+    const removedTrailingArtifacts = [];
 
-    for (const marker of markers) {
-      const markerIndex = chinese.indexOf(marker);
-      if (markerIndex !== -1) {
-        const payload = chinese.slice(markerIndex + marker.length);
-        if (payload.length >= 4) {
-          // Take the first four characters after the prompt. Taking the last
-          // four can include a closing bracket OCR misreads as Chinese.
-          return payload.slice(0, 4);
-        }
-      }
+    // Remove prompt characters and common bracket OCR artifacts only while
+    // they appear at either edge. Characters inside the payload are retained.
+    while (remainingCharacters.length > 0 && edgeArtifacts.has(remainingCharacters[0])) {
+      removedLeadingArtifacts.push(remainingCharacters.shift());
+    }
+    while (remainingCharacters.length > 0 && edgeArtifacts.has(remainingCharacters.at(-1))) {
+      removedTrailingArtifacts.unshift(remainingCharacters.pop());
     }
 
-    // The fixed prefix 依次点击 is four Chinese characters.
-    if (chinese.length >= 8) return chinese.slice(4, 8);
-    return chinese.slice(0, 4);
+    const targets = remainingCharacters.join('');
+    return {
+      chineseOnlyText: chineseCharacters.join(''),
+      removedLeadingArtifacts,
+      removedTrailingArtifacts,
+      afterEdgeCleanup: targets,
+      targets,
+      targetCount: remainingCharacters.length,
+      isValid: remainingCharacters.length === 4
+    };
   }
 
   function scoreTargetsFromOutput(outputData, numClasses, seqLen, targetIndices) {
@@ -511,132 +549,298 @@
   }
 
   // --- Solve Click Captcha ---
-  async function solveClickCaptcha(imageDataBase64) {
-    await Promise.all([loadCharset(), loadOcrSession(), loadDetSession()]);
-
-    // 1. Decode main image
-    const imageData = await decodeImage(imageDataBase64);
-    const { width: origWidth, height: origHeight } = imageData;
-
-    console.log(`[ONNX Click] Captcha image decoded: ${origWidth}x${origHeight}`);
-
-    // 2. Crop the bottom bar (prompt text)
-    // The black bar is at the bottom. Typically bottom 28% of the image.
-    const barHeight = Math.round(origHeight * 0.28);
-    const barY = origHeight - barHeight;
-    const barBase64 = cropImageToBase64(imageData, 0, barY, origWidth, barHeight);
-
-    // 3. Solve OCR on the bottom bar to get prompt characters (allow Chinese)
-    const ocrRawResult = await solveCaptcha(barBase64, true);
-    console.log(`[ONNX Click] Bottom bar raw OCR: "${ocrRawResult}"`);
-
-    // Extract the first four characters after the fixed prompt. This avoids
-    // treating the closing bracket as a target when OCR reads it as 丫.
-    const targets = extractClickTargets(ocrRawResult);
-    console.log(`[ONNX Click] Target characters to click in order: "${targets}"`);
-
-    if (targets.length !== 4) {
-      throw new Error(`未能识别出4个目标字符，识别到: "${targets}"`);
-    }
-
-    // 4. Run target detection on the full image
-    const boxes = await runTargetDetection(imageData);
-
-    // Filter boxes in the main area (above the bottom bar)
-    const mainBoxes = boxes.filter(box => {
-      const y2 = box[3];
-      return y2 < barY;
-    });
-
-    console.log(`[ONNX Click] Filtered boxes: ${mainBoxes.length} boxes in main area`);
-
-    if (mainBoxes.length < 4) {
-      throw new Error(`目标检测只找到 ${mainBoxes.length} 个候选字，至少需要4个`);
-    }
-
-    const targetIndices = Array.from(targets).map(char => charset.indexOf(char));
-    if (targetIndices.some(index => index < 0)) {
-      throw new Error(`目标字符不在OCR字符集中: ${targets}`);
-    }
-
-    // 5. Score every box against only the four requested characters while
-    // rotating each crop to compensate for random glyph orientation.
-    const coarseAngles = [];
-    for (let angle = 0; angle < 360; angle += 15) coarseAngles.push(angle);
-    const rotationCandidates = [];
-
-    for (const box of mainBoxes) {
-      const [x1, y1, x2, y2] = box;
-      const w = x2 - x1;
-      const h = y2 - y1;
-      const padding = Math.max(2, Math.round(Math.max(w, h) * 0.15));
-      const candidateImage = cropImageData(
-        imageData,
-        x1 - padding,
-        y1 - padding,
-        x2 + padding,
-        Math.min(barY, y2 + padding)
-      );
-      const rotationScores = await scoreRotatedCandidate(
-        candidateImage,
-        targetIndices,
-        coarseAngles
-      );
-      rotationCandidates.push({
-        imageData: candidateImage,
-        scores: rotationScores.scores,
-        angles: rotationScores.angles,
-        center: {
-          x: Math.round(x1 + w / 2),
-          y: Math.round(y1 + h / 2)
+  async function solveClickCaptcha(imageDataBase64, captureDebug = false) {
+    const totalStartedAt = performance.now();
+    let currentStage = '模型加载';
+    const debugDetails = captureDebug ? {
+      schemaVersion: 1,
+      stage: currentStage,
+      original: null,
+      promptRecognition: null,
+      detection: null,
+      candidates: [],
+      finalAssignment: null,
+      timings: {},
+      configuration: {
+        promptOcr: {
+          model: 'models/common_old.onnx',
+          charset: 'models/charset_old.json',
+          input: '底部 28% 提示条裁剪图',
+          preprocessing: '等比缩放到高度 64，灰度化，像素归一化到 [0,1]',
+          decoding: 'CTC 去重与去 blank，仅保留中文字符',
+          targetCleaning: '仅保留汉字；从首尾连续移除飞/丫/依/次/点/击/放/下/谈/百/了/工/亡/已/己；必须恰好剩余四字'
+        },
+        targetDetection: {
+          model: 'models/common_det.onnx',
+          inputSize: '416×416',
+          preprocessing: '保持宽高比缩放，BGR CHW，填充色 RGB(114,114,114)',
+          scoreThreshold: 0.1,
+          nmsThreshold: 0.45
+        },
+        candidateRecognition: {
+          cropPaddingRatio: 0.15,
+          minimumPaddingPx: 2,
+          coarseAngles: '0°–345°，步长 15°',
+          scoreDefinition: '目标字符 logit 减去 blank logit',
+          assignment: '所有目标字与候选框的最高总分一对一匹配'
         }
+      }
+    } : null;
+
+    try {
+      const modelStartedAt = performance.now();
+      await Promise.all([loadCharset(), loadOcrSession(), loadDetSession()]);
+      if (debugDetails) {
+        debugDetails.timings.modelReadyMs = Math.round((performance.now() - modelStartedAt) * 10) / 10;
+      }
+
+      // 1. Decode main image
+      currentStage = '验证码原图解码';
+      if (debugDetails) debugDetails.stage = currentStage;
+      const imageData = await decodeImage(imageDataBase64);
+      const { width: origWidth, height: origHeight } = imageData;
+      if (debugDetails) debugDetails.original = { width: origWidth, height: origHeight };
+
+      console.log(`[ONNX Click] Captcha image decoded: ${origWidth}x${origHeight}`);
+
+      // 2. Crop the bottom bar (prompt text)
+      // The black bar is at the bottom. Typically bottom 28% of the image.
+      currentStage = '目标文字识别';
+      if (debugDetails) debugDetails.stage = currentStage;
+      const promptStartedAt = performance.now();
+      const barHeight = Math.round(origHeight * 0.28);
+      const barY = origHeight - barHeight;
+      const barBase64 = cropImageToBase64(imageData, 0, barY, origWidth, barHeight);
+      if (debugDetails) {
+        debugDetails.promptRecognition = {
+          inputImageData: barBase64,
+          crop: { x: 0, y: barY, width: origWidth, height: barHeight },
+          cropRatio: 0.28,
+          modelDecodedResult: null,
+          cleanedOcrResult: null,
+          sequenceLength: null,
+          predictedIndices: null,
+          decodedIndices: null,
+          targetCleaning: null,
+          extractedTargets: null,
+          durationMs: null
+        };
+      }
+
+      // 3. Solve OCR on the exact bottom-bar crop to get prompt characters.
+      const promptOcrOutput = await solveCaptcha(barBase64, true, captureDebug);
+      const cleanedOcrText = captureDebug
+        ? promptOcrOutput.cleanedResult
+        : promptOcrOutput;
+      console.log(`[ONNX Click] Bottom bar cleaned OCR: "${cleanedOcrText}"`);
+
+      const targetCleaning = cleanClickTargetText(cleanedOcrText);
+      const targets = targetCleaning.targets;
+      console.log(`[ONNX Click] Target characters to click in order: "${targets}"`);
+      if (debugDetails) {
+        debugDetails.promptRecognition.modelDecodedResult = promptOcrOutput.modelDecodedResult;
+        debugDetails.promptRecognition.cleanedOcrResult = promptOcrOutput.cleanedResult;
+        debugDetails.promptRecognition.sequenceLength = promptOcrOutput.sequenceLength;
+        debugDetails.promptRecognition.predictedIndices = promptOcrOutput.predictedIndices;
+        debugDetails.promptRecognition.decodedIndices = promptOcrOutput.decodedIndices;
+        debugDetails.promptRecognition.targetCleaning = targetCleaning;
+        debugDetails.promptRecognition.extractedTargets = Array.from(targets);
+        debugDetails.promptRecognition.durationMs = Math.round((performance.now() - promptStartedAt) * 10) / 10;
+      }
+
+      if (!targetCleaning.isValid) {
+        throw new Error(
+          `目标文字清洗后必须正好为4个汉字，当前为 ${targetCleaning.targetCount} 个: "${targets}"`
+        );
+      }
+
+      // 4. Run target detection on the full image.
+      currentStage = '候选文字检测';
+      if (debugDetails) debugDetails.stage = currentStage;
+      const detectionStartedAt = performance.now();
+      const boxes = await runTargetDetection(imageData);
+
+      // Filter boxes in the main area (above the bottom bar).
+      const mainBoxes = boxes.filter(box => {
+        const y2 = box[3];
+        return y2 < barY;
       });
-    }
-
-    // Refine ±5° around each best coarse angle.
-    for (const candidate of rotationCandidates) {
-      const refineAngles = new Set();
-      for (const angle of candidate.angles) {
-        refineAngles.add((angle + 355) % 360);
-        refineAngles.add((angle + 5) % 360);
+      if (debugDetails) {
+        debugDetails.detection = {
+          input: '验证码完整原图',
+          boxFormat: '[x1, y1, x2, y2, score, classId]',
+          promptBoundaryY: barY,
+          allBoxes: boxes.map(box => box.slice()),
+          mainAreaBoxes: mainBoxes.map(box => box.slice()),
+          totalBoxCount: boxes.length,
+          mainAreaBoxCount: mainBoxes.length,
+          durationMs: Math.round((performance.now() - detectionStartedAt) * 10) / 10
+        };
       }
-      const refined = await scoreRotatedCandidate(
-        candidate.imageData,
-        targetIndices,
-        Array.from(refineAngles)
-      );
-      for (let targetIndex = 0; targetIndex < targets.length; targetIndex++) {
-        if (refined.scores[targetIndex] > candidate.scores[targetIndex]) {
-          candidate.scores[targetIndex] = refined.scores[targetIndex];
-          candidate.angles[targetIndex] = refined.angles[targetIndex];
+
+      console.log(`[ONNX Click] Filtered boxes: ${mainBoxes.length} boxes in main area`);
+
+      if (mainBoxes.length < 4) {
+        throw new Error(`目标检测只找到 ${mainBoxes.length} 个候选字，至少需要4个`);
+      }
+
+      const targetIndices = Array.from(targets).map(char => charset.indexOf(char));
+      if (targetIndices.some(index => index < 0)) {
+        throw new Error(`目标字符不在OCR字符集中: ${targets}`);
+      }
+
+      // 5. Score every detected crop against the four target characters while
+      // rotating each crop to compensate for random glyph orientation.
+      currentStage = '候选字旋转识别';
+      if (debugDetails) debugDetails.stage = currentStage;
+      const scoringStartedAt = performance.now();
+      const coarseAngles = [];
+      for (let angle = 0; angle < 360; angle += 15) coarseAngles.push(angle);
+      const rotationCandidates = [];
+
+      for (let candidateIndex = 0; candidateIndex < mainBoxes.length; candidateIndex++) {
+        const box = mainBoxes[candidateIndex];
+        const [x1, y1, x2, y2] = box;
+        const w = x2 - x1;
+        const h = y2 - y1;
+        const padding = Math.max(2, Math.round(Math.max(w, h) * 0.15));
+        const cropBox = {
+          x1: Math.max(0, Math.floor(x1 - padding)),
+          y1: Math.max(0, Math.floor(y1 - padding)),
+          x2: Math.min(origWidth, Math.ceil(x2 + padding)),
+          y2: Math.min(barY, Math.ceil(y2 + padding))
+        };
+        const candidateImage = cropImageData(
+          imageData,
+          cropBox.x1,
+          cropBox.y1,
+          cropBox.x2,
+          cropBox.y2
+        );
+        const candidateStartedAt = performance.now();
+        const debugCandidate = captureDebug ? {
+          candidateIndex,
+          detectionBox: box.slice(),
+          cropBox,
+          center: {
+            x: Math.round(x1 + w / 2),
+            y: Math.round(y1 + h / 2)
+          },
+          cropImageData: imageDataToBase64(candidateImage),
+          cropWidth: candidateImage.width,
+          cropHeight: candidateImage.height,
+          coarseAngleStep: 15,
+          coarseResults: null,
+          durationMs: null,
+          status: '粗筛识别中'
+        } : null;
+        if (debugCandidate) debugDetails.candidates.push(debugCandidate);
+
+        let rotationScores;
+        try {
+          rotationScores = await scoreRotatedCandidate(
+            candidateImage,
+            targetIndices,
+            coarseAngles
+          );
+        } catch (err) {
+          if (debugCandidate) {
+            debugCandidate.durationMs = Math.round((performance.now() - candidateStartedAt) * 10) / 10;
+            debugCandidate.status = `粗筛失败：${err.message || err}`;
+          }
+          throw err;
         }
+        if (debugCandidate) {
+          debugCandidate.coarseResults = Array.from(targets).map((target, targetIndex) => ({
+            targetIndex,
+            order: targetIndex + 1,
+            target,
+            score: rotationScores.scores[targetIndex],
+            bestAngle: rotationScores.angles[targetIndex],
+            bestInputImageData: imageDataToBase64(
+              rotateImageData(candidateImage, rotationScores.angles[targetIndex])
+            )
+          }));
+          debugCandidate.durationMs = Math.round((performance.now() - candidateStartedAt) * 10) / 10;
+          debugCandidate.status = '粗筛完成，直接用于全局匹配';
+        }
+        rotationCandidates.push({
+          scores: rotationScores.scores,
+          angles: rotationScores.angles,
+          center: {
+            x: Math.round(x1 + w / 2),
+            y: Math.round(y1 + h / 2)
+          }
+        });
       }
+
+      if (debugDetails) {
+        debugDetails.timings.candidateScoringMs = Math.round((performance.now() - scoringStartedAt) * 10) / 10;
+      }
+
+      currentStage = '全局一对一匹配';
+      if (debugDetails) debugDetails.stage = currentStage;
+      const rotationAssignment = findBestTargetAssignment(rotationCandidates, targets.length);
+      if (!rotationAssignment) {
+        throw new Error(`无法为目标字符建立一一匹配: ${targets}`);
+      }
+
+      const assignedScores = rotationAssignment.assignments.map(
+        (boxIndex, targetIndex) => rotationCandidates[boxIndex].scores[targetIndex]
+      );
+      const scoreSummary = rotationAssignment.assignments.map((boxIndex, targetIndex) => {
+        const candidate = rotationCandidates[boxIndex];
+        return `${targets[targetIndex]}@(${candidate.center.x},${candidate.center.y})`
+          + `=${candidate.scores[targetIndex].toFixed(2)}/${candidate.angles[targetIndex]}°`;
+      }).join(`, `);
+      console.log(`[ONNX Click] Rotation-aware assignment: ${scoreSummary}`);
+
+      const assignments = rotationAssignment.assignments.map((boxIndex, targetIndex) => {
+        const candidate = rotationCandidates[boxIndex];
+        const angle = candidate.angles[targetIndex];
+        return {
+          order: targetIndex + 1,
+          target: targets[targetIndex],
+          candidateIndex: boxIndex,
+          center: candidate.center,
+          score: candidate.scores[targetIndex],
+          bestAngle: angle,
+          recognitionInputImageData: captureDebug
+            ? debugDetails.candidates[boxIndex].coarseResults[targetIndex].bestInputImageData
+            : null
+        };
+      });
+      if (debugDetails) {
+        debugDetails.finalAssignment = {
+          totalScore: rotationAssignment.score,
+          scoreSummary,
+          assignments,
+          clickCoordinates: assignments.map(assignment => assignment.center)
+        };
+      }
+
+      if (assignedScores.some(score => !Number.isFinite(score))) {
+        throw new Error(`旋转识别分数异常. 目标: ${targets}, 匹配: ${scoreSummary}`);
+      }
+
+      const rotationClickCoords = assignments.map(assignment => assignment.center);
+      currentStage = '完成';
+      if (debugDetails) {
+        debugDetails.stage = currentStage;
+        debugDetails.timings.totalMs = Math.round((performance.now() - totalStartedAt) * 10) / 10;
+      }
+      console.log(`[ONNX Click] Successfully matched coordinates:`, rotationClickCoords);
+      return { coordinates: rotationClickCoords, debugDetails };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (debugDetails) {
+        debugDetails.stage = currentStage;
+        debugDetails.failure = { stage: currentStage, message: error.message };
+        debugDetails.timings.totalMs = Math.round((performance.now() - totalStartedAt) * 10) / 10;
+        error.debugDetails = debugDetails;
+      }
+      throw error;
     }
-
-    const rotationAssignment = findBestTargetAssignment(rotationCandidates, targets.length);
-    if (!rotationAssignment) {
-      throw new Error(`无法为目标字符建立一一匹配: ${targets}`);
-    }
-
-    const assignedScores = rotationAssignment.assignments.map(
-      (boxIndex, targetIndex) => rotationCandidates[boxIndex].scores[targetIndex]
-    );
-    const scoreSummary = rotationAssignment.assignments.map((boxIndex, targetIndex) => {
-      const candidate = rotationCandidates[boxIndex];
-      return `${targets[targetIndex]}@(${candidate.center.x},${candidate.center.y})`
-        + `=${candidate.scores[targetIndex].toFixed(2)}/${candidate.angles[targetIndex]}°`;
-    }).join(`, `);
-    console.log(`[ONNX Click] Rotation-aware assignment: ${scoreSummary}`);
-
-    if (assignedScores.some(score => !Number.isFinite(score) || score <= 0)) {
-      throw new Error(`旋转识别置信度不足. 目标: ${targets}, 匹配: ${scoreSummary}`);
-    }
-
-    const rotationClickCoords = rotationAssignment.assignments.map(
-      boxIndex => rotationCandidates[boxIndex].center
-    );
-    console.log(`[ONNX Click] Successfully matched coordinates:`, rotationClickCoords);
-    return rotationClickCoords;
   }
 
   // --- Decode base64 image using canvas ---
@@ -720,13 +924,13 @@
     }
 
     if (message.action === 'offscreen_solveClickCaptcha') {
-      solveClickCaptcha(message.imageData)
-        .then(result => {
-          sendResponse({ result });
+      solveClickCaptcha(message.imageData, message.captureDebug === true)
+        .then(output => {
+          sendResponse({ result: output.coordinates, debugDetails: output.debugDetails });
         })
         .catch(err => {
           console.error('[ONNX Click] Solve failed:', err);
-          sendResponse({ error: err.message });
+          sendResponse({ error: err.message, debugDetails: err.debugDetails || null });
         });
       return true; // Keep message channel open
     }

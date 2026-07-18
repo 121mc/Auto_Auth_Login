@@ -50,20 +50,46 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ----- Save credentials -----
   saveBtn.addEventListener('click', async () => {
-    const username = usernameInput.value.trim();
+    const enteredUsername = usernameInput.value.trim();
     const password = passwordInput.value;
+    const debugPrefix = '--debug-';
+    const debugMode = enteredUsername.startsWith(debugPrefix);
+    const username = debugMode
+      ? enteredUsername.slice(debugPrefix.length).trim()
+      : enteredUsername;
 
     if (!username || !password) {
-      showToast('请填写学号和密码', 'error');
+      showToast(debugMode ? '请在 --debug- 后填写真实学号' : '请填写学号和密码', 'error');
       return;
     }
 
     await chrome.storage.local.set({
       nju_username: username,
       nju_password: password,
+      nju_debug_mode: debugMode,
     });
-    showToast('学号和密码已保存', 'success');
-    addLog('学号和密码已保存');
+
+    // Never leave the debug marker in the visible or stored username. Both
+    // supported login pages must receive the user's real student number.
+    usernameInput.value = username;
+
+    if (debugMode) {
+      let response;
+      try {
+        response = await chrome.runtime.sendMessage({ action: 'enableDebugMode' });
+      } catch (err) {
+        response = { ok: false, error: err.message };
+      }
+      if (!response || response.ok !== true) {
+        showToast(`Debug 模式开启失败: ${response?.error || '未知错误'}`, 'error');
+        return;
+      }
+      showToast('Debug 模式已开启', 'success');
+      addLog(`Debug 模式已开启，登录账号为 ${username}`);
+    } else {
+      showToast('学号和密码已保存', 'success');
+      addLog('学号和密码已保存，Debug 模式未开启');
+    }
   });
 
   // ----- Toggle settings save immediately -----

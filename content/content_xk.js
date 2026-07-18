@@ -229,10 +229,10 @@
   }
 
   // ---- Ask the background / offscreen worker to solve the click-captcha ----
-  function solveClickCaptcha(imageBase64) {
+  function solveClickCaptcha(imageBase64, debugContext = {}) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { action: 'solveClickCaptcha', imageData: imageBase64 },
+        { action: 'solveClickCaptcha', imageData: imageBase64, debugContext },
         (response) => {
           if (chrome.runtime.lastError) {
             reject(new Error(chrome.runtime.lastError.message));
@@ -507,7 +507,12 @@
 
           // 3. Call offscreen to solve the click-captcha
           log('正在识别验证码...');
-          const coords = await solveClickCaptcha(captchaSnapshot.imageBase64);
+          const coords = await solveClickCaptcha(captchaSnapshot.imageBase64, {
+            attempt: retryCount,
+            pageUrl: window.location.href,
+            imageUrl: captchaSnapshot.src,
+            clickYOffset: CAPTCHA_CLICK_Y_OFFSET
+          });
           log(`识别成功，点击坐标: ${JSON.stringify(coords)}`);
           if (!Array.isArray(coords) || coords.length !== 4) {
             throw new Error(`验证码识别结果无效: ${JSON.stringify(coords)}`);

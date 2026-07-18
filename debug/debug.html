@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NJU 验证码 Debug</title>
+  <link rel="stylesheet" href="debug.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">NJU AUTO AUTH LOGIN</p>
+      <h1>验证码识别 Debug</h1>
+      <p class="subtitle">实时记录本次 Debug 会话中的验证码原图、识别结果与耗时。</p>
+    </div>
+    <div class="actions">
+      <span class="mode-badge" id="modeBadge"><i></i><span>读取状态中</span></span>
+      <button type="button" class="secondary-btn" id="exportBtn">导出 JSON</button>
+      <button type="button" class="danger-btn" id="clearBtn">清空记录</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="summary" aria-label="Debug 摘要">
+      <div><span>识别总数</span><strong id="totalCount">0</strong></div>
+      <div><span>成功</span><strong id="successCount">0</strong></div>
+      <div><span>失败</span><strong id="errorCount">0</strong></div>
+      <div><span>平均耗时</span><strong id="averageTime">-</strong></div>
+      <div><span>会话开始</span><strong id="sessionStarted">-</strong></div>
+    </section>
+
+    <section class="empty-state" id="emptyState">
+      <div class="empty-icon">◎</div>
+      <h2>等待验证码识别</h2>
+      <p>触发统一身份认证或选课系统自动登录后，记录会自动出现在这里。</p>
+    </section>
+
+    <section class="record-list" id="recordList" aria-live="polite"></section>
+  </main>
+
+  <template id="recordTemplate">
+    <article class="record-card">
+      <div class="record-head">
+        <div class="record-title-row">
+          <span class="type-badge"></span>
+          <span class="status-badge"></span>
+          <strong class="source"></strong>
+        </div>
+        <time class="timestamp"></time>
+      </div>
+      <div class="record-body">
+        <figure class="image-panel">
+          <div class="image-wrap"><img class="captcha-image" alt="验证码原图"></div>
+          <figcaption>验证码原图</figcaption>
+        </figure>
+        <div class="details">
+          <div class="result-block">
+            <span>识别结果</span>
+            <pre class="result"></pre>
+          </div>
+          <dl>
+            <div><dt>耗时</dt><dd class="duration"></dd></div>
+            <div><dt>尝试次数</dt><dd class="attempt"></dd></div>
+            <div><dt>图片尺寸</dt><dd class="dimensions">读取中</dd></div>
+            <div><dt>完成时间戳</dt><dd class="raw-timestamp"></dd></div>
+          </dl>
+          <div class="error-message"></div>
+          <details>
+            <summary>上下文详情</summary>
+            <pre class="context"></pre>
+          </details>
+        </div>
+      </div>
+      <section class="click-debug-details" hidden></section>
+    </article>
+  </template>
+
+  <script src="debug.js"></script>
+</body>
+</html>
