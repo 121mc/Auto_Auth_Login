@@ -593,9 +593,18 @@
             return;
           }
 
-          // Still nothing – assume wrong captcha, refresh and retry
-          log('⚠️ 未检测到明确结果，刷新验证码重试...', 'warn');
-          await refreshCaptchaAndWait(8000);
+          // The system may skip the round-selection dialog when there is only
+          // one available round. In that case, start course selection directly.
+          if (isCaptchaError()) {
+            log('❌ 验证码错误，刷新后重试...', 'warn');
+            await refreshCaptchaAndWait(8000);
+            continue;
+          }
+
+          log('✅ 未出现选轮次弹窗，等待并直接点击“开始选课”按钮...');
+          await clickCourseButton();
+          isRunning = false;
+          return;
 
         } catch (err) {
           if (isInferenceEngineError(err)) {
