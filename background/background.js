@@ -213,6 +213,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 
+  if (message.action === 'recordSliderCaptchaDebug') {
+    safelyRecordCaptchaDebug({
+      captchaType: 'slider',
+      imageData: message.imageData || '',
+      result: message.result,
+      error: message.error,
+      startedAt: message.startedAt,
+      context: message.context,
+      debugDetails: message.debugDetails
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
   if (message.action === 'loginComplete') {
     const tabId = sender.tab ? sender.tab.id : message.tabId;
     handleLoginComplete(message.success, tabId, message.message, message.userInitiated);

@@ -108,6 +108,8 @@ main { width: min(1280px, calc(100% - 48px)); margin: 30px auto 80px; }
 .captcha-image { display: block; max-width: 100%; max-height: 340px; image-rendering: auto; }
 .image-panel figcaption { margin-top: 11px; color: #64748b; font-size: 11px; }
 .point-marker { position: absolute; z-index: 2; width: 22px; height: 22px; transform: translate(-50%, -50%); border: 2px solid #fb7185; border-radius: 50%; background: rgba(244, 63, 94, .15); box-shadow: 0 0 0 2px rgba(255,255,255,.75); color: #881337; font: 800 11px/18px system-ui, sans-serif; text-align: center; }
+.slider-target-marker { position: absolute; z-index: 3; width: 2px; transform: translateX(-1px); background: #2dd4bf; box-shadow: 0 0 0 1px rgba(255,255,255,.72), 0 0 12px rgba(45,212,191,.85); pointer-events: none; }
+.slider-target-marker span { position: absolute; top: 7px; left: 6px; width: max-content; padding: 3px 6px; border-radius: 5px; background: rgba(13,148,136,.9); color: #ecfeff; font: 800 10px/1.2 ui-monospace, monospace; }
 
 .details { padding: 22px; min-width: 0; }
 .result-block > span { display: block; margin-bottom: 7px; color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }

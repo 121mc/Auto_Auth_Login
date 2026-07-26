@@ -88,9 +88,12 @@ function render() {
 function createRecordCard(record) {
   const card = elements.template.content.firstElementChild.cloneNode(true);
   const isClick = record.captchaType === 'click';
+  const isSlider = record.captchaType === 'slider';
   const success = record.status === 'success';
   card.classList.toggle('is-error', !success);
-  card.querySelector('.type-badge').textContent = isClick ? '点选验证码' : '字符验证码';
+  card.querySelector('.type-badge').textContent = isClick
+    ? '点选验证码'
+    : (isSlider ? '滑动验证码' : '字符验证码');
   const statusBadge = card.querySelector('.status-badge');
   statusBadge.textContent = success ? '成功' : '失败';
   statusBadge.classList.add(success ? 'success' : 'error');
@@ -126,6 +129,9 @@ function createRecordCard(record) {
     if (isClick && record.debugDetails?.detection?.mainAreaBoxes) {
       addDetectionBoxes(card, image, record.debugDetails.detection.mainAreaBoxes);
     }
+    if (isSlider && Number.isFinite(record.debugDetails?.detection?.targetLeft)) {
+      addSliderTargetMarker(card, image, record.debugDetails.detection.targetLeft);
+    }
   });
   image.addEventListener('error', () => {
     card.querySelector('.dimensions').textContent = '图片读取失败';
@@ -135,6 +141,12 @@ function createRecordCard(record) {
       card.querySelector('.click-debug-details'),
       record.debugDetails,
       record.context || {}
+    );
+  }
+  if (isSlider && record.debugDetails) {
+    renderSliderDebugDetails(
+      card.querySelector('.click-debug-details'),
+      record.debugDetails
     );
   }
   return card;
@@ -178,6 +190,21 @@ function addDetectionBoxes(card, image, boxes) {
     overlay.appendChild(label);
     imageWrap.appendChild(overlay);
   });
+}
+
+function addSliderTargetMarker(card, image, targetLeft) {
+  const imageWrap = card.querySelector('.image-wrap');
+  const imageRect = image.getBoundingClientRect();
+  const wrapRect = imageWrap.getBoundingClientRect();
+  const marker = document.createElement('span');
+  marker.className = 'slider-target-marker';
+  marker.style.left = `${imageRect.left - wrapRect.left + targetLeft * imageRect.width / image.naturalWidth}px`;
+  marker.style.top = `${imageRect.top - wrapRect.top}px`;
+  marker.style.height = `${imageRect.height}px`;
+  const label = document.createElement('span');
+  label.textContent = `缺口 X=${Math.round(targetLeft)}`;
+  marker.appendChild(label);
+  imageWrap.appendChild(marker);
 }
 
 function renderClickDebugDetails(container, details, context) {
@@ -227,6 +254,129 @@ function renderClickDebugDetails(container, details, context) {
   }, 2);
   rawDetails.append(summary, raw);
   container.appendChild(rawDetails);
+}
+
+function renderSliderDebugDetails(container, details) {
+  container.hidden = false;
+  container.replaceChildren();
+
+  const heading = document.createElement('div');
+  heading.className = 'pipeline-heading';
+  const title = document.createElement('h3');
+  title.textContent = '滑动验证码完整执行过程';
+  const stage = document.createElement('span');
+  stage.textContent = `最终阶段：${details.stage || '未知'}`;
+  heading.append(title, stage);
+  container.appendChild(heading);
+
+  const outcome = details.outcome || {};
+  if (!['redirect', 'success-class'].includes(outcome.type)) {
+    const failure = document.createElement('div');
+    failure.className = 'pipeline-failure';
+    failure.textContent = `结果：${outcome.type || '未知'}；${outcome.message || '无详细信息'}`;
+    container.appendChild(failure);
+  }
+
+  const canvas = details.canvas || {};
+  const background = canvas.background || {};
+  const block = canvas.block || {};
+  const canvasStage = createPipelineStage(1, '读取背景与拼图画布');
+  const canvasGrid = document.createElement('div');
+  canvasGrid.className = 'stage-grid';
+  canvasGrid.appendChild(createDebugImage(block.imageData, '滑块拼图 Canvas 原图'));
+  canvasGrid.appendChild(createFacts([
+    ['背景像素尺寸', background.width == null ? '-' : `${background.width} × ${background.height}`],
+    ['背景显示尺寸', background.cssWidth == null ? '-' : `${formatScore(background.cssWidth)} × ${formatScore(background.cssHeight)}`],
+    ['拼图像素尺寸', block.width == null ? '-' : `${block.width} × ${block.height}`],
+    ['拼图显示尺寸', block.cssWidth == null ? '-' : `${formatScore(block.cssWidth)} × ${formatScore(block.cssHeight)}`],
+    ['滑轨容器宽度', formatPixel(canvas.sliderContainerWidth)],
+    ['画布抓取耗时', formatDuration(details.timings?.canvasCaptureMs)]
+  ]));
+  canvasStage.appendChild(canvasGrid);
+  container.appendChild(canvasStage);
+
+  const detection = details.detection || {};
+  const detectionStage = createPipelineStage(2, '定位缺口并换算拖动距离');
+  detectionStage.appendChild(createFacts([
+    ['缺口左边界', formatPixel(detection.targetLeft)],
+    ['边界采样点', detection.boundaryPixelCount],
+    ['内部采样点', detection.interiorPixelCount],
+    ['横向候选位置', detection.candidateCount],
+    ['最佳评分', formatScore(detection.bestScore)],
+    ['拼图最右边界', formatPixel(detection.maxBlockX)],
+    ['拖动修正量', formatPixel(detection.correction)],
+    ['最终拖动距离', formatPixel(detection.dragDistance)],
+    ['滑块最大行程', formatPixel(detection.sliderTravel)],
+    ['定位耗时', formatDuration(details.timings?.targetDetectionMs)],
+    ['顶部原图标记', Number.isFinite(detection.targetLeft) ? '青色竖线表示识别出的缺口 X 坐标' : '未定位']
+  ]));
+  container.appendChild(detectionStage);
+
+  const trajectory = details.trajectory || {};
+  const bounds = trajectory.rawBounds || {};
+  const trajectoryStage = createPipelineStage(3, '随机轨迹缩放与完整播放');
+  trajectoryStage.appendChild(createFacts([
+    ['轨迹文件', trajectory.filename],
+    ['原始点数', trajectory.rawPointCount],
+    ['原始起点', formatPoint(trajectory.rawStart)],
+    ['原始终点', formatPoint(trajectory.rawEnd)],
+    ['原始范围', `X ${formatScore(bounds.minX)}…${formatScore(bounds.maxX)}；Y ${formatScore(bounds.minY)}…${formatScore(bounds.maxY)}`],
+    ['横向缩放比例', formatScore(trajectory.horizontalScale, 5)],
+    ['纵向缩放比例', formatScore(trajectory.verticalScale, 5)],
+    ['最大原始纵向偏移', formatPixel(trajectory.maxVerticalOffset)],
+    ['调度方式', trajectory.scheduler],
+    ['每帧点数上限', trajectory.maxPointsPerFrame],
+    ['请求点间隔', formatDuration(trajectory.pointIntervalMs)],
+    ['实际平均点间隔', formatDuration(trajectory.actualAveragePointIntervalMs)],
+    ['目标播放时间', formatDuration(trajectory.requestedDurationMs)],
+    ['实际播放时间', formatDuration(trajectory.actualPlaybackDurationMs)],
+    ['加载与缩放耗时', formatDuration(trajectory.trajectoryLoadAndScaleMs)],
+    ['最终偏移', formatPoint(trajectory.finalOffset)]
+  ]));
+  const note = document.createElement('p');
+  note.className = 'pipeline-note';
+  note.textContent = `完整保留并记录了 ${trajectory.rawPointCount || 0} 个原始点及同数量的缩放点；导出 Debug JSON 可查看每一个坐标。`;
+  trajectoryStage.appendChild(note);
+  container.appendChild(trajectoryStage);
+
+  const timingStage = createPipelineStage(4, '校验结果与阶段耗时');
+  timingStage.appendChild(createFacts([
+    ['校验结果类型', outcome.type],
+    ['结果说明', outcome.message],
+    ['等待画布', formatDuration(details.timings?.elementsReadyMs)],
+    ['滑动后缓冲等待', formatDuration(details.timings?.postDragDelayMs)],
+    ['等待校验结果', formatDuration(details.timings?.verificationWaitMs)],
+    ['本次尝试总耗时', formatDuration(details.timings?.totalAttemptMs)]
+  ]));
+  container.appendChild(timingStage);
+
+  const rawDetails = document.createElement('details');
+  rawDetails.className = 'raw-debug-details';
+  const summary = document.createElement('summary');
+  summary.textContent = '完整滑块元数据（图片与点列已折叠，导出时保留）';
+  const raw = document.createElement('pre');
+  raw.className = 'context';
+  raw.textContent = JSON.stringify(details, (key, value) => {
+    if (typeof value === 'string' && /imageData$/i.test(key)) {
+      return `[base64 image, ${value.length} chars]`;
+    }
+    if ((key === 'rawPoints' || key === 'scaledPoints') && Array.isArray(value)) {
+      return `[${value.length} coordinate points]`;
+    }
+    return value;
+  }, 2);
+  rawDetails.append(summary, raw);
+  container.appendChild(rawDetails);
+}
+
+function formatPoint(point) {
+  if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) return '-';
+  return `(${formatScore(point.x)}, ${formatScore(point.y)})`;
+}
+
+function formatPixel(value) {
+  if (value == null || value === '') return '-';
+  return Number.isFinite(Number(value)) ? `${formatScore(value)} px` : '-';
 }
 
 function createPipelineStage(number, title) {

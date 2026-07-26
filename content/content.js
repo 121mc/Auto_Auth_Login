@@ -16,6 +16,7 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+
   async function refreshCaptcha(loginViewDiv, captchaImg = null, timeoutMs = 2000) {
     const image = captchaImg || loginViewDiv.querySelector('#captchaImg') ||
                   document.querySelector('.login-main #captchaImg');
@@ -107,7 +108,7 @@
     }
     return null;
   }
-  function findSliderTarget(elements) {
+  function findSliderTarget(elements, debugDetails = null) {
     const { blockCanvas, backgroundCanvas } = elements;
     const width = backgroundCanvas.width;
     const height = backgroundCanvas.height;
@@ -182,11 +183,26 @@
     }
 
     if (bestLeft < 0) throw new Error('Unable to locate the slider target');
+    if (debugDetails) {
+      Object.assign(debugDetails, {
+        backgroundWidth: width,
+        backgroundHeight: height,
+        blockWidth,
+        blockHeight,
+        boundaryPixelCount: boundaryPixels.length,
+        interiorPixelCount: interiorPixels.length,
+        maxBlockX,
+        candidateCount: Math.max(0, width - maxBlockX - 2),
+        bestScore,
+        bestLeft
+      });
+    }
     return bestLeft;
   }
 
   const sliderTrajectoryFiles = ['1.json', '2.json', '3.json', '4.json', '5.json'];
-  const sliderTrajectoryDurationMs = 450;
+  const sliderTrajectoryIntervalMs = 1;
+  const sliderTrajectoryMaxPointsPerFrame = 24;
   let lastSliderTrajectoryIndex = -1;
 
   function pickSliderTrajectoryFile() {
@@ -213,6 +229,23 @@
     return { filename, points };
   }
 
+  function captureSliderCanvas(canvas) {
+    if (!canvas) return null;
+    try {
+      return canvas.toDataURL('image/png');
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function recordSliderDebugAttempt(payload) {
+    try {
+      await chrome.runtime.sendMessage({ action: 'recordSliderCaptchaDebug', ...payload });
+    } catch (error) {
+      console.error('[NJU Auto Auth][debug] Failed to record slider attempt:', error);
+    }
+  }
+
   function scaleSliderTrajectory(points, dragDistance, sliderTravel) {
     const first = points[0];
     const last = points.at(-1);
@@ -224,10 +257,29 @@
     const verticalScale = maxVerticalOffset > 0 ? Math.min(1, 7 / maxVerticalOffset) : 1;
     const maxX = Math.max(0, sliderTravel - 1);
 
-    return points.map(point => ({
+    const scaledPoints = points.map(point => ({
       x: Math.max(0, Math.min(maxX, (point.x - first.x) * horizontalScale)),
       y: (point.y - first.y) * verticalScale
     }));
+    const xs = points.map(point => point.x);
+    const ys = points.map(point => point.y);
+
+    return {
+      points: scaledPoints,
+      metadata: {
+        horizontalScale,
+        verticalScale,
+        maxVerticalOffset,
+        rawStart: first,
+        rawEnd: last,
+        rawBounds: {
+          minX: Math.min(...xs),
+          maxX: Math.max(...xs),
+          minY: Math.min(...ys),
+          maxY: Math.max(...ys)
+        }
+      }
+    };
   }
 
   async function dragSlider(elements, targetLeft, attempt) {
@@ -244,25 +296,33 @@
     ));
     const startX = sliderRect.left + sliderWidth / 2;
     const startY = sliderRect.top + (sliderRect.height || 40) / 2;
+    const trajectoryLoadStartedAt = performance.now();
     const recorded = await loadSliderTrajectory();
-    const trajectory = scaleSliderTrajectory(recorded.points, dragDistance, sliderTravel);
+    const scaled = scaleSliderTrajectory(recorded.points, dragDistance, sliderTravel);
+    const trajectory = scaled.points;
+    const trajectoryLoadAndScaleMs = performance.now() - trajectoryLoadStartedAt;
 
     slider.dispatchEvent(new MouseEvent('mousedown', {
       bubbles: true, cancelable: true, clientX: startX, clientY: startY, buttons: 1
     }));
 
 
-    log(`Using slider trajectory ${recorded.filename} (${trajectory.length} raw points, ${sliderTrajectoryDurationMs}ms)`);
+    const requestedDurationMs = (trajectory.length - 1) * sliderTrajectoryIntervalMs;
+    log(`Using slider trajectory ${recorded.filename} (${trajectory.length} raw points, ${sliderTrajectoryIntervalMs}ms/point)`);
 
-    // Keep every recorded point. Dense trajectories dispatch several ordered
-    // mousemove events per animation frame so the complete path stays under 0.5s.
+    // Preserve the 1ms trajectory timeline without flooding the task queue.
+    // Each animation frame dispatches due points with a safety cap, leaving the
+    // browser one rendering opportunity per frame and avoiding catch-up bursts.
+    const playbackStartedAt = performance.now();
     await new Promise(resolve => {
-      const startedAt = performance.now();
       let lastDispatchedIndex = 0;
-
       const playFrame = now => {
-        const progress = Math.min(1, (now - startedAt) / sliderTrajectoryDurationMs);
-        const targetIndex = Math.floor(progress * (trajectory.length - 1));
+        const elapsed = now - playbackStartedAt;
+        const targetIndex = Math.min(
+          trajectory.length - 1,
+          lastDispatchedIndex + sliderTrajectoryMaxPointsPerFrame,
+          Math.floor(elapsed / sliderTrajectoryIntervalMs)
+        );
         while (lastDispatchedIndex < targetIndex) {
           lastDispatchedIndex += 1;
           const point = trajectory[lastDispatchedIndex];
@@ -274,10 +334,9 @@
             buttons: 1
           }));
         }
-        if (progress < 1) requestAnimationFrame(playFrame);
+        if (lastDispatchedIndex < trajectory.length - 1) requestAnimationFrame(playFrame);
         else resolve();
       };
-
       requestAnimationFrame(playFrame);
     });
 
@@ -289,34 +348,184 @@
       clientY: startY + finalPoint.y,
       buttons: 0
     }));
+    const actualPlaybackDurationMs = performance.now() - playbackStartedAt;
+
+    return {
+      attempt,
+      filename: recorded.filename,
+      rawPointCount: recorded.points.length,
+      rawPoints: recorded.points,
+      scaledPoints: trajectory,
+      pointIntervalMs: sliderTrajectoryIntervalMs,
+      scheduler: 'requestAnimationFrame-batched',
+      maxPointsPerFrame: sliderTrajectoryMaxPointsPerFrame,
+      requestedDurationMs,
+      actualPlaybackDurationMs,
+      actualAveragePointIntervalMs: actualPlaybackDurationMs / (trajectory.length - 1),
+      trajectoryLoadAndScaleMs,
+      targetLeft,
+      correction,
+      dragDistance,
+      sliderTravel,
+      sliderWidth,
+      containerWidth,
+      startClientPoint: { x: startX, y: startY },
+      finalOffset: finalPoint,
+      ...scaled.metadata
+    };
   }
 
   async function solveSliderCaptcha(maxAttempts = 5) {
+    const debugState = await chrome.storage.local.get('nju_debug_mode');
+    const sliderDebugEnabled = debugState.nju_debug_mode === true;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      log(`Starting slider attempt ${attempt}...`);
-      const elements = await waitForSliderElements(5000);
-      if (!elements) throw new Error('Timed out while loading slider captcha');
+      const attemptStartedAt = Date.now();
+      const performanceStartedAt = performance.now();
+      const timings = {};
+      let elements = null;
+      let imageData = '';
+      let canvasDetails = null;
+      let targetLeft = null;
+      let detectionAlgorithmDetails = {};
+      let trajectoryDetails = null;
+      let stage = '等待滑块画布';
+      let outcome = { type: 'unknown', message: '尚未得到校验结果' };
+      let debugRecorded = false;
 
-      const targetLeft = findSliderTarget(elements);
-      log(`Slider target located at ${targetLeft}px`);
-      await dragSlider(elements, targetLeft, attempt);
+      const writeDebugRecord = async (success, error = '') => {
+        if (!sliderDebugEnabled || debugRecorded) return;
+        debugRecorded = true;
+        timings.totalAttemptMs = performance.now() - performanceStartedAt;
+        await recordSliderDebugAttempt({
+          imageData,
+          result: success ? {
+            targetLeft,
+            dragDistance: trajectoryDetails?.dragDistance,
+            trajectoryFile: trajectoryDetails?.filename,
+            pointCount: trajectoryDetails?.rawPointCount,
+            outcome: outcome.type
+          } : null,
+          error,
+          startedAt: attemptStartedAt,
+          context: {
+            attempt,
+            maxAttempts,
+            pageUrl: window.location.href
+          },
+          debugDetails: {
+            schemaVersion: 1,
+            stage,
+            canvas: canvasDetails,
+            detection: targetLeft == null ? null : {
+              ...detectionAlgorithmDetails,
+              targetLeft,
+              correction: trajectoryDetails?.correction ?? 0,
+              dragDistance: trajectoryDetails?.dragDistance,
+              sliderTravel: trajectoryDetails?.sliderTravel
+            },
+            trajectory: trajectoryDetails,
+            timings,
+            outcome
+          }
+        });
+      };
 
-      const deadline = Date.now() + 2500;
-      while (Date.now() < deadline) {
-        if (!window.location.href.includes('authserver/login')) return true;
-        if (elements.sliderContainer.classList.contains('sliderContainer_success')) {
-          log('Slider verified; waiting for login submission...');
-          const outcome = await waitForLoginOutcome(6000);
-          if (outcome.success) return true;
-          if (outcome.errorText) throw new Error(`Login failed: ${outcome.errorText}`);
-          // Some versions remove the captcha before submitting the form.
-          if (!document.querySelector('#sliderCaptchaDiv .sliderContainer')) return true;
-          break;
+      try {
+        log(`Starting slider attempt ${attempt}...`);
+        const elementsStartedAt = performance.now();
+        elements = await waitForSliderElements(5000);
+        timings.elementsReadyMs = performance.now() - elementsStartedAt;
+        if (!elements) throw new Error('Timed out while loading slider captcha');
+
+        if (sliderDebugEnabled) {
+          const captureStartedAt = performance.now();
+          const backgroundRect = elements.backgroundCanvas.getBoundingClientRect();
+          const blockRect = elements.blockCanvas.getBoundingClientRect();
+          imageData = captureSliderCanvas(elements.backgroundCanvas) || '';
+          canvasDetails = {
+            background: {
+              width: elements.backgroundCanvas.width,
+              height: elements.backgroundCanvas.height,
+              cssWidth: backgroundRect.width,
+              cssHeight: backgroundRect.height
+            },
+            block: {
+              width: elements.blockCanvas.width,
+              height: elements.blockCanvas.height,
+              cssWidth: blockRect.width,
+              cssHeight: blockRect.height,
+              imageData: captureSliderCanvas(elements.blockCanvas)
+            },
+            sliderContainerWidth: elements.sliderContainer.getBoundingClientRect().width
+          };
+          timings.canvasCaptureMs = performance.now() - captureStartedAt;
         }
-        if (elements.sliderContainer.classList.contains('sliderContainer_fail')) break;
-        const errorText = getLoginErrorText();
-        if (errorText) throw new Error(`Login failed: ${errorText}`);
-        await sleep(100);
+
+        stage = '定位拼图缺口';
+        const detectionStartedAt = performance.now();
+        targetLeft = findSliderTarget(
+          elements,
+          sliderDebugEnabled ? detectionAlgorithmDetails : null
+        );
+        timings.targetDetectionMs = performance.now() - detectionStartedAt;
+        log(`Slider target located at ${targetLeft}px`);
+
+        stage = '加载并播放轨迹';
+        trajectoryDetails = await dragSlider(elements, targetLeft, attempt);
+        timings.trajectoryLoadAndScaleMs = trajectoryDetails.trajectoryLoadAndScaleMs;
+        timings.trajectoryPlaybackMs = trajectoryDetails.actualPlaybackDurationMs;
+
+        stage = '滑动后等待';
+        const postDragDelayStartedAt = performance.now();
+        await sleep(500);
+        timings.postDragDelayMs = performance.now() - postDragDelayStartedAt;
+
+        stage = '等待滑块校验结果';
+        const verificationStartedAt = performance.now();
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          if (!window.location.href.includes('authserver/login')) {
+            timings.verificationWaitMs = performance.now() - verificationStartedAt;
+            stage = '校验成功';
+            outcome = { type: 'redirect', message: '页面已离开统一身份认证登录页' };
+            await writeDebugRecord(true);
+            return true;
+          }
+          if (elements.sliderContainer.classList.contains('sliderContainer_success')) {
+            timings.verificationWaitMs = performance.now() - verificationStartedAt;
+            stage = '校验成功';
+            outcome = { type: 'success-class', message: '检测到 sliderContainer_success' };
+            await writeDebugRecord(true);
+            log('Slider verified; waiting for login submission...');
+            const loginOutcome = await waitForLoginOutcome(6000);
+            if (loginOutcome.success) return true;
+            if (loginOutcome.errorText) throw new Error(`Login failed: ${loginOutcome.errorText}`);
+            if (!document.querySelector('#sliderCaptchaDiv .sliderContainer')) return true;
+            break;
+          }
+          if (elements.sliderContainer.classList.contains('sliderContainer_fail')) {
+            timings.verificationWaitMs = performance.now() - verificationStartedAt;
+            stage = '校验失败';
+            outcome = { type: 'failure-class', message: '检测到 sliderContainer_fail' };
+            break;
+          }
+          const errorText = getLoginErrorText();
+          if (errorText) throw new Error(`Login failed: ${errorText}`);
+          await sleep(100);
+        }
+
+        if (!timings.verificationWaitMs) {
+          timings.verificationWaitMs = performance.now() - verificationStartedAt;
+          stage = '校验超时';
+          outcome = { type: 'timeout', message: '2.5 秒内未观察到成功或失败状态' };
+        }
+        await writeDebugRecord(false, outcome.message);
+      } catch (error) {
+        stage = stage === '校验成功' ? stage : '执行异常';
+        outcome = { type: 'exception', message: error.message || String(error) };
+        await writeDebugRecord(false, outcome.message);
+        throw error;
       }
 
       if (attempt < maxAttempts) {
