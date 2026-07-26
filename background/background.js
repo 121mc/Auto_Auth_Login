@@ -6,6 +6,7 @@ const ALARM_NAME = 'nju_auth_check';
 const LOGIN_URL = 'https://authserver.nju.edu.cn/authserver/login';
 const REDIRECT_URL = 'https://authserver.nju.edu.cn/personalInfo/personCenter/index.html';
 const DEBUG_PAGE_URL = chrome.runtime.getURL('debug/debug.html');
+const RECORD_PAGE_URL = chrome.runtime.getURL('record/record.html');
 const DEBUG_RECORD_PREFIX = 'nju_debug_record_';
 let loginCompletionInProgress = false;
 
@@ -175,6 +176,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'enableRecordMode') {
+    enableRecordMode(message.studentId)
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === 'updateSettings') {
     handleUpdateSettings(message.enabled)
       .then(() => sendResponse({ ok: true }))
@@ -260,6 +268,38 @@ async function enableDebugMode() {
   });
   await openDebugPage();
   await addLog('Debug 记录页已打开，开始记录验证码识别详情');
+}
+
+async function openRecordPage() {
+  const state = await chrome.storage.local.get('nju_record_tab_id');
+  if (Number.isInteger(state.nju_record_tab_id)) {
+    try {
+      const tab = await chrome.tabs.get(state.nju_record_tab_id);
+      if (tab.url === RECORD_PAGE_URL) {
+        await chrome.tabs.reload(tab.id);
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+        return tab;
+      }
+    } catch (_) {
+      // Closed record tab; create a new one below.
+    }
+  }
+  const tab = await chrome.tabs.create({ url: RECORD_PAGE_URL, active: true });
+  await chrome.storage.local.set({ nju_record_tab_id: tab.id });
+  return tab;
+}
+
+async function enableRecordMode(studentId) {
+  const normalizedStudentId = String(studentId || '').trim();
+  if (!normalizedStudentId) throw new Error('缺少学号');
+  await chrome.storage.local.remove([
+    'nju_record_student_id',
+    'nju_record_session_id',
+    'nju_record_started_at',
+    'nju_slider_recordings'
+  ]);
+  await openRecordPage();
 }
 
 async function recordCaptchaDebug({

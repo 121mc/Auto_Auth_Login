@@ -397,24 +397,44 @@
     return null;
   }
 
-  function waitForConfirmButton(timeout = 5000) {
+  function findCourseButton() {
+    const courseButton = document.getElementById('courseBtn');
+    if (courseButton && !courseButton.disabled && courseButton.offsetParent !== null) {
+      return courseButton;
+    }
+    return null;
+  }
+
+  function waitForPostLoginAction(timeout = 20000) {
     return new Promise(resolve => {
       let settled = false;
       let observer;
       let timeoutId;
 
-      function finish(button) {
+      function finish(result) {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutId);
         observer.disconnect();
-        resolve(button);
+        resolve(result);
       }
 
       function check() {
         const confirmButton = findConfirmButton();
-        if (confirmButton) finish(confirmButton);
-        else if (isCaptchaError()) finish(null);
+        if (confirmButton) {
+          finish({ type: 'confirm', button: confirmButton });
+          return;
+        }
+
+        const courseButton = findCourseButton();
+        if (courseButton) {
+          finish({ type: 'course', button: courseButton });
+          return;
+        }
+
+        if (isCaptchaError()) {
+          finish({ type: 'captcha-error' });
+        }
       }
 
       observer = new MutationObserver(check);
@@ -425,12 +445,12 @@
         characterData: true,
         attributeFilter: ['class', 'style', 'disabled']
       });
-      timeoutId = setTimeout(() => finish(null), timeout);
+      timeoutId = setTimeout(() => finish({ type: 'timeout' }), timeout);
       check();
     });
   }
 
-  function clickCourseButton(timeout = 10000) {
+  function clickCourseButton(timeout = 20000) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let observer;
@@ -446,8 +466,8 @@
       }
 
       function check() {
-        const courseButton = document.getElementById('courseBtn');
-        if (courseButton && !courseButton.disabled && courseButton.offsetParent !== null) {
+        const courseButton = findCourseButton();
+        if (courseButton) {
           courseButton.click();
           log('✅ 已点击“开始选课”按钮');
           finish();
@@ -568,44 +588,30 @@
           loginBtn.click();
           log('已点击登录按钮，等待响应...');
 
-          // 6. Poll rapidly and continue as soon as confirmation appears.
-          const confirmBtn = await waitForConfirmButton(5000);
-          if (confirmBtn) {
+          // 6. Wait for either the round confirmation or the course button.
+          const postLoginAction = await waitForPostLoginAction();
+          if (postLoginAction.type === 'confirm') {
             log('✅ 登录成功！检测到选轮次弹窗，点击确认...');
-            await confirmRoundAndStartCourse(confirmBtn);
+            await confirmRoundAndStartCourse(postLoginAction.button);
             isRunning = false;
             return;
           }
 
-          // Check if captcha was wrong
-          if (isCaptchaError()) {
+          if (postLoginAction.type === 'course') {
+            log('✅ 登录成功！检测到“开始选课”按钮，准备点击...');
+            await clickCourseButton();
+            isRunning = false;
+            return;
+          }
+
+          if (postLoginAction.type === 'captcha-error') {
             log('❌ 验证码错误，刷新后重试...', 'warn');
             await refreshCaptchaAndWait(8000);
             continue;
           }
 
-          // Allow a little more time for a slow server response.
-          const confirmBtn2 = await waitForConfirmButton(2500);
-          if (confirmBtn2) {
-            log('✅ 延迟检测到选轮次弹窗，点击确认...');
-            await confirmRoundAndStartCourse(confirmBtn2);
-            isRunning = false;
-            return;
-          }
-
-          // The system may skip the round-selection dialog when there is only
-          // one available round. In that case, start course selection directly.
-          if (isCaptchaError()) {
-            log('❌ 验证码错误，刷新后重试...', 'warn');
-            await refreshCaptchaAndWait(8000);
-            continue;
-          }
-
-          log('✅ 未出现选轮次弹窗，等待并直接点击“开始选课”按钮...');
-          await clickCourseButton();
-          isRunning = false;
-          return;
-
+          log('⚠️ 等待“确认轮次”或“开始选课”按钮超时，刷新验证码重试...', 'warn');
+          await refreshCaptchaAndWait(8000);
         } catch (err) {
           if (isInferenceEngineError(err)) {
             log(`验证码识别引擎错误，停止自动化: ${err.message}`, 'error');

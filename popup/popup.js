@@ -53,10 +53,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     const enteredUsername = usernameInput.value.trim();
     const password = passwordInput.value;
     const debugPrefix = '--debug-';
+    const recordPrefix = '--record-';
+    const recordMode = enteredUsername.startsWith(recordPrefix);
     const debugMode = enteredUsername.startsWith(debugPrefix);
-    const username = debugMode
-      ? enteredUsername.slice(debugPrefix.length).trim()
-      : enteredUsername;
+    const username = recordMode
+      ? enteredUsername.slice(recordPrefix.length).trim()
+      : (debugMode ? enteredUsername.slice(debugPrefix.length).trim() : enteredUsername);
+
+    if (recordMode) {
+      if (!username) {
+        showToast('请在 --record- 后填写学号', 'error');
+        return;
+      }
+      let response;
+      try {
+        response = await chrome.runtime.sendMessage({ action: 'enableRecordMode', studentId: username });
+      } catch (err) {
+        response = { ok: false, error: err.message };
+      }
+      if (!response || response.ok !== true) {
+        showToast('Record 模式开启失败: ' + (response?.error || '未知错误'), 'error');
+        return;
+      }
+      usernameInput.value = username;
+      showToast('Record 模式已开启', 'success');
+      addLog('Record 模式已开启，轨迹仅保存在本地模拟页面（' + username + '）');
+      return;
+    }
 
     if (!username || !password) {
       showToast(debugMode ? '请在 --debug- 后填写真实学号' : '请填写学号和密码', 'error');

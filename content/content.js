@@ -73,15 +73,6 @@
            isElementVisible(captchaImg) ? { captchaDiv, captchaInput, captchaImg } : null;
   }
 
-  async function waitForVisibleImageCaptcha(loginViewDiv, timeoutMs = 1500) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const captcha = getVisibleImageCaptcha(loginViewDiv);
-      if (captcha) return captcha;
-      await sleep(100);
-    }
-    return getVisibleImageCaptcha(loginViewDiv);
-  }
 
   function getSliderElements() {
     const root = document.querySelector('#sliderCaptchaDiv');
@@ -117,59 +108,74 @@
     return null;
   }
   function findSliderTarget(elements) {
-    const { root, blockCanvas, backgroundCanvas } = elements;
-    const sourceImage = root.querySelector('#slider-img1');
-    if (!sourceImage || !sourceImage.complete || !sourceImage.naturalWidth) {
-      throw new Error('Slider source image is not loaded');
-    }
-
+    const { blockCanvas, backgroundCanvas } = elements;
     const width = backgroundCanvas.width;
     const height = backgroundCanvas.height;
-    const sourceCanvas = document.createElement('canvas');
-    sourceCanvas.width = width;
-    sourceCanvas.height = height;
-    const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
-    sourceContext.drawImage(sourceImage, 0, 0, width, height);
-
-    const source = sourceContext.getImageData(0, 0, width, height).data;
+    const backgroundContext = backgroundCanvas.getContext('2d', { willReadFrequently: true });
+    const background = backgroundContext.getImageData(0, 0, width, height).data;
     const blockContext = blockCanvas.getContext('2d', { willReadFrequently: true });
     const blockWidth = blockCanvas.width;
     const blockHeight = blockCanvas.height;
     const block = blockContext.getImageData(0, 0, blockWidth, blockHeight).data;
-    const samplePixels = [];
+    const boundaryPixels = [];
+    const interiorPixels = [];
+    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    const alphaAt = (x, y) => {
+      if (x < 0 || x >= blockWidth || y < 0 || y >= blockHeight) return 0;
+      return block[(y * blockWidth + x) * 4 + 3];
+    };
+    const gradientAt = (x, y) => {
+      const luminanceAt = (sampleX, sampleY) => {
+        const index = (sampleY * width + sampleX) * 4;
+        return background[index] * 0.299 +
+               background[index + 1] * 0.587 +
+               background[index + 2] * 0.114;
+      };
+      return Math.abs(luminanceAt(x + 1, y) - luminanceAt(x - 1, y)) +
+             Math.abs(luminanceAt(x, y + 1) - luminanceAt(x, y - 1));
+    };
 
-    // Ignore the translucent puzzle border. Interior opaque pixels preserve the
-    // original image and provide a much more reliable template match.
-    for (let y = 1; y < Math.min(height, blockHeight) - 1; y += 2) {
-      for (let x = 1; x < blockWidth - 1; x += 2) {
-        const index = (y * blockWidth + x) * 4;
-        if (block[index + 3] < 245) continue;
-        const leftAlpha = block[index - 1];
-        const rightAlpha = block[index + 7];
-        const upperAlpha = block[index - blockWidth * 4 + 3];
-        const lowerAlpha = block[index + blockWidth * 4 + 3];
-        if (leftAlpha < 220 || rightAlpha < 220 || upperAlpha < 220 || lowerAlpha < 220) continue;
-        samplePixels.push({ x, y, r: block[index], g: block[index + 1], b: block[index + 2] });
+    // A real gap has a strong puzzle-shaped edge but relatively little texture
+    // inside it. Penalizing interior gradients prevents natural image edges
+    // (buildings, text, etc.) from winning on edge strength alone.
+    for (let y = 2; y < Math.min(height, blockHeight) - 2; y++) {
+      for (let x = 2; x < blockWidth - 2; x++) {
+        const alpha = alphaAt(x, y);
+        const isInterior = alpha > 245 && directions.every(
+          ([dx, dy]) => alphaAt(x + dx, y + dy) > 220
+        );
+        if (isInterior) {
+          if ((x + y) % 3 === 0) interiorPixels.push({ x, y });
+          continue;
+        }
+        if (alpha >= 128 && directions.some(
+          ([dx, dy]) => alphaAt(x + dx, y + dy) < 32
+        )) {
+          boundaryPixels.push({ x, y });
+        }
       }
     }
 
-    if (samplePixels.length < 20) {
-      throw new Error('Unable to read slider puzzle pixels');
+    if (boundaryPixels.length < 12 || interiorPixels.length < 12) {
+      throw new Error('Unable to read slider puzzle outline');
     }
 
-    const maxBlockX = samplePixels.reduce((max, pixel) => Math.max(max, pixel.x), 0);
+    const maxBlockX = boundaryPixels.reduce((max, pixel) => Math.max(max, pixel.x), 0);
     let bestLeft = -1;
-    let bestScore = Infinity;
-    for (let left = 0; left + maxBlockX < width; left++) {
-      let score = 0;
-      for (const pixel of samplePixels) {
-        const sourceIndex = (pixel.y * width + left + pixel.x) * 4;
-        score += Math.abs(pixel.r - source[sourceIndex]) +
-                 Math.abs(pixel.g - source[sourceIndex + 1]) +
-                 Math.abs(pixel.b - source[sourceIndex + 2]);
-        if (score >= bestScore) break;
+    let bestScore = -Infinity;
+    for (let left = 1; left + maxBlockX < width - 1; left++) {
+      let edgeGradient = 0;
+      let interiorGradient = 0;
+      for (const pixel of boundaryPixels) {
+        edgeGradient += gradientAt(left + pixel.x, pixel.y);
       }
-      if (score < bestScore) {
+      for (const pixel of interiorPixels) {
+        interiorGradient += gradientAt(left + pixel.x, pixel.y);
+      }
+      const edgeMean = edgeGradient / boundaryPixels.length;
+      const interiorMean = interiorGradient / interiorPixels.length;
+      const score = edgeMean - interiorMean * 0.8;
+      if (score > bestScore) {
         bestScore = score;
         bestLeft = left;
       }
@@ -178,6 +184,52 @@
     if (bestLeft < 0) throw new Error('Unable to locate the slider target');
     return bestLeft;
   }
+
+  const sliderTrajectoryFiles = ['1.json', '2.json', '3.json', '4.json', '5.json'];
+  const sliderTrajectoryDurationMs = 450;
+  let lastSliderTrajectoryIndex = -1;
+
+  function pickSliderTrajectoryFile() {
+    let index = Math.floor(Math.random() * sliderTrajectoryFiles.length);
+    if (sliderTrajectoryFiles.length > 1 && index === lastSliderTrajectoryIndex) {
+      index = (index + 1 + Math.floor(Math.random() * (sliderTrajectoryFiles.length - 1))) %
+              sliderTrajectoryFiles.length;
+    }
+    lastSliderTrajectoryIndex = index;
+    return sliderTrajectoryFiles[index];
+  }
+
+  async function loadSliderTrajectory() {
+    const filename = pickSliderTrajectoryFile();
+    const response = await fetch(chrome.runtime.getURL(`recordings/${filename}`));
+    if (!response.ok) throw new Error(`Unable to load slider trajectory ${filename}`);
+
+    const points = (await response.json()).filter(point =>
+      Number.isFinite(point?.x) && Number.isFinite(point?.y)
+    );
+    if (points.length < 2 || Math.abs(points.at(-1).x - points[0].x) < 1) {
+      throw new Error(`Invalid slider trajectory ${filename}`);
+    }
+    return { filename, points };
+  }
+
+  function scaleSliderTrajectory(points, dragDistance, sliderTravel) {
+    const first = points[0];
+    const last = points.at(-1);
+    const horizontalScale = dragDistance / (last.x - first.x);
+    const maxVerticalOffset = points.reduce(
+      (maximum, point) => Math.max(maximum, Math.abs(point.y - first.y)),
+      0
+    );
+    const verticalScale = maxVerticalOffset > 0 ? Math.min(1, 7 / maxVerticalOffset) : 1;
+    const maxX = Math.max(0, sliderTravel - 1);
+
+    return points.map(point => ({
+      x: Math.max(0, Math.min(maxX, (point.x - first.x) * horizontalScale)),
+      y: (point.y - first.y) * verticalScale
+    }));
+  }
+
   async function dragSlider(elements, targetLeft, attempt) {
     const { slider, sliderContainer, backgroundCanvas } = elements;
     const sliderRect = slider.getBoundingClientRect();
@@ -185,38 +237,56 @@
     const sliderWidth = sliderRect.width || 40;
     const sliderTravel = containerWidth - sliderWidth;
     // NJU's customized Longbow 2.0 moves the handle and puzzle block 1:1.
-    const correction = [-1, 0, 1, -2, 2][(attempt - 1) % 5];
+    const correction = 0;
     const dragDistance = Math.max(2, Math.min(
       sliderTravel - 1,
       targetLeft + correction
     ));
     const startX = sliderRect.left + sliderWidth / 2;
     const startY = sliderRect.top + (sliderRect.height || 40) / 2;
+    const recorded = await loadSliderTrajectory();
+    const trajectory = scaleSliderTrajectory(recorded.points, dragDistance, sliderTravel);
 
     slider.dispatchEvent(new MouseEvent('mousedown', {
       bubbles: true, cancelable: true, clientX: startX, clientY: startY, buttons: 1
     }));
 
-    const steps = 30 + attempt * 2;
-    for (let step = 1; step <= steps; step++) {
-      const t = step / steps;
-      const eased = 1 - Math.pow(1 - t, 3);
-      const jitter = Math.sin(step * 1.7) * 1.4 + Math.sin(step * 0.43) * 0.8;
-      document.dispatchEvent(new MouseEvent('mousemove', {
-        bubbles: true,
-        cancelable: true,
-        clientX: startX + dragDistance * eased,
-        clientY: startY + jitter,
-        buttons: 1
-      }));
-      await sleep(10 + (step % 4) * 3);
-    }
 
+    log(`Using slider trajectory ${recorded.filename} (${trajectory.length} raw points, ${sliderTrajectoryDurationMs}ms)`);
+
+    // Keep every recorded point. Dense trajectories dispatch several ordered
+    // mousemove events per animation frame so the complete path stays under 0.5s.
+    await new Promise(resolve => {
+      const startedAt = performance.now();
+      let lastDispatchedIndex = 0;
+
+      const playFrame = now => {
+        const progress = Math.min(1, (now - startedAt) / sliderTrajectoryDurationMs);
+        const targetIndex = Math.floor(progress * (trajectory.length - 1));
+        while (lastDispatchedIndex < targetIndex) {
+          lastDispatchedIndex += 1;
+          const point = trajectory[lastDispatchedIndex];
+          document.dispatchEvent(new MouseEvent('mousemove', {
+            bubbles: true,
+            cancelable: true,
+            clientX: startX + point.x,
+            clientY: startY + point.y,
+            buttons: 1
+          }));
+        }
+        if (progress < 1) requestAnimationFrame(playFrame);
+        else resolve();
+      };
+
+      requestAnimationFrame(playFrame);
+    });
+
+    const finalPoint = trajectory.at(-1);
     document.dispatchEvent(new MouseEvent('mouseup', {
       bubbles: true,
       cancelable: true,
-      clientX: startX + dragDistance,
-      clientY: startY + Math.sin(steps * 1.7) * 1.4,
+      clientX: startX + finalPoint.x,
+      clientY: startY + finalPoint.y,
       buttons: 0
     }));
   }
@@ -250,8 +320,7 @@
       }
 
       if (attempt < maxAttempts) {
-        log('Slider verification failed; waiting for refresh...', 'warn');
-        await sleep(1200);
+        log('Slider verification failed; retrying immediately...', 'warn');
       }
     }
     throw new Error('Slider verification failed after multiple attempts');
@@ -270,6 +339,10 @@
       if (getSliderElements()) {
         log('Slider captcha appeared after submit; solving...');
         return solveSliderCaptcha();
+      }
+      if (getVisibleImageCaptcha(loginViewDiv)) {
+        log('Image captcha appeared after submit; starting recognition...');
+        return false;
       }
       const errorText = getLoginErrorText();
       if (errorText) throw new Error(`Login failed: ${errorText}`);
@@ -380,40 +453,35 @@
       }
     }
 
-    // Step 3: Fill username
-    log('填写用户名...');
-    usernameField.removeAttribute('readonly');
-    setNativeValue(usernameField, username);
-    usernameField.dispatchEvent(new Event('input', { bubbles: true }));
-    usernameField.dispatchEvent(new Event('change', { bubbles: true }));
-    usernameField.dispatchEvent(new Event('focusout', { bubbles: true }));
-    usernameField.dispatchEvent(new Event('blur', { bubbles: true }));
-    await sleep(100);
-
-    // Step 4: Fill password
-    log('填写密码...');
+    // Step 3: Fill username and password in the same turn.
+    log('并行填写用户名和密码...');
     const passwordField = loginViewDiv.querySelector('.m-account #password') ||
                           loginViewDiv.querySelector('#password');
     if (!passwordField) {
       throw new Error('找不到密码输入框');
     }
+
+    usernameField.removeAttribute('readonly');
     passwordField.removeAttribute('readonly');
+    setNativeValue(usernameField, username);
     setNativeValue(passwordField, password);
+    usernameField.dispatchEvent(new Event('input', { bubbles: true }));
+    usernameField.dispatchEvent(new Event('change', { bubbles: true }));
     passwordField.dispatchEvent(new Event('input', { bubbles: true }));
     passwordField.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(100);
+    usernameField.dispatchEvent(new Event('focusout', { bubbles: true }));
+    usernameField.dispatchEvent(new Event('blur', { bubbles: true }));
 
-    // Step 5: Wait for captcha to load and solve it in a loop
-    // The page calls checkNeedCaptcha() on username blur
-    // For NJU, _badCredentialsCount == 0 means captcha is always shown
-    log('等待验证码加载...');
-    // Removed static sleep to ensure instant filling upon page load
-    const visibleImageCaptcha = await waitForVisibleImageCaptcha(loginViewDiv);
+    // Step 4: Check once and submit immediately when no image captcha is visible.
+    let visibleImageCaptcha = getVisibleImageCaptcha(loginViewDiv);
     if (!visibleImageCaptcha) {
-      await submitWithoutImageCaptcha(loginViewDiv);
-      log('Login completed without an image captcha.', 'success');
-      notifyLoginResult(true, '', isPageLogin);
-      return;
+      const submitted = await submitWithoutImageCaptcha(loginViewDiv);
+      if (submitted) {
+        log('Login completed without an image captcha.', 'success');
+        notifyLoginResult(true, '', isPageLogin);
+        return;
+      }
+      visibleImageCaptcha = getVisibleImageCaptcha(loginViewDiv);
     }
 
     log('Image captcha is visible; starting recognition...');

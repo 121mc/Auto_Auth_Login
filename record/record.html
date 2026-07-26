@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>滑块轨迹录制</title>
+  <link rel="stylesheet" href="record.css">
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div><p class="eyebrow">LOCAL POINTER LAB</p><h1>滑块轨迹录制</h1><p>仅保存滑块相对位置坐标，不写入学号、时间、设备或会话信息。</p></div>
+      <div class="session" id="folderCard"><span>JSON 保存目录</span><strong id="folderStatus">尚未授权</strong><small>请选择项目中的 recordings 文件夹</small><button class="secondary folder-button" id="folderBtn" type="button">选择保存目录</button></div>
+    </header>
+
+    <section class="panel recorder">
+      <div class="panel-head"><div><h2>模拟验证码</h2><p id="hint">请先选择保存目录</p></div><button class="secondary" id="resetBtn" type="button">换一个</button></div>
+      <div class="captcha" id="captcha">
+        <div class="scene"><div class="mountain a"></div><div class="mountain b"></div><div class="sun"></div><div class="target" id="target"></div><div class="piece" id="piece"></div></div>
+        <div class="slider" id="slider"><div class="slider-fill" id="sliderFill"></div><span class="slider-copy" id="sliderCopy">选择目录后即可录制</span><button class="handle" id="handle" type="button" aria-label="拖动滑块" disabled><span>››</span></button></div>
+      </div>
+      <canvas id="traceCanvas" aria-label="当前轨迹图"></canvas>
+    </section>
+
+    <section class="stats" aria-live="polite">
+      <article><span>采样点</span><strong id="sampleCount">0</strong></article><article><span>持续时间</span><strong id="duration">0 ms</strong></article><article><span>平均采样率</span><strong id="sampleRate">0 Hz</strong></article><article><span>轨迹长度</span><strong id="pathLength">0 px</strong></article><article><span>峰值速度</span><strong id="peakSpeed">0 px/s</strong></article>
+    </section>
+
+    <section class="panel history-panel">
+      <div class="panel-head"><div><h2>自动保存状态</h2><p>每次松开滑块后自动生成一个新 JSON，并自动换成下一道模拟验证码。</p></div></div>
+      <div class="save-status"><div><span>本页已保存</span><strong id="savedCount">0 个文件</strong></div><div><span>最近文件</span><strong id="lastFile">-</strong></div></div>
+      <p class="privacy-note">文件内容格式：<code>[{"x": 0, "y": 26}, ...]</code>。除相对位置坐标外不包含任何字段。</p>
+    </section>
+  </main>
+  <script src="record.js"></script>
+</body>
+</html>

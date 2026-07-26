@@ -50,7 +50,8 @@
         "lib/ort-wasm-simd-threaded.mjs",
         "models/common_old.onnx",
         "models/charset_old.json",
-        "models/common_det.onnx"
+        "models/common_det.onnx",
+        "recordings/*.json"
       ],
       "matches": ["<all_urls>"]
     }
