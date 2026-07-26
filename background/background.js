@@ -215,6 +215,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'recordSliderCaptchaDebug') {
     safelyRecordCaptchaDebug({
+      recordId: message.recordId,
+      status: message.status,
       captchaType: 'slider',
       imageData: message.imageData || '',
       result: message.result,
@@ -318,6 +320,8 @@ async function enableRecordMode(studentId) {
 }
 
 async function recordCaptchaDebug({
+  recordId,
+  status,
   captchaType,
   imageData,
   result,
@@ -333,7 +337,7 @@ async function recordCaptchaDebug({
   if (!debugState.nju_debug_mode || !debugState.nju_debug_session_id) return;
 
   const finishedAt = Date.now();
-  const id = crypto.randomUUID();
+  const id = recordId || crypto.randomUUID();
   const record = {
     id,
     sessionId: debugState.nju_debug_session_id,
@@ -341,7 +345,7 @@ async function recordCaptchaDebug({
     source: captchaType === 'click' ? '选课系统' : '统一身份认证',
     imageData,
     result: result ?? null,
-    status: error ? 'error' : 'success',
+    status: status || (error ? 'error' : 'success'),
     error: error || '',
     startedAt,
     finishedAt,
@@ -350,9 +354,8 @@ async function recordCaptchaDebug({
     debugDetails: debugDetails && typeof debugDetails === 'object' ? debugDetails : null
   };
 
-  // Store every recognition under an independent key. This avoids rewriting a
-  // growing image history and prevents concurrent recognitions from overwriting
-  // one another.
+  // A caller-provided ID lets long-running slider attempts persist immediately
+  // and update the same record after the final verification result arrives.
   await chrome.storage.local.set({ [`${DEBUG_RECORD_PREFIX}${id}`]: record });
 }
 

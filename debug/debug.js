@@ -74,7 +74,7 @@ function render() {
   }
 
   const successCount = records.filter(record => record.status === 'success').length;
-  const errorCount = records.length - successCount;
+  const errorCount = records.filter(record => record.status === 'error').length;
   const totalDuration = records.reduce((sum, record) => sum + (Number(record.durationMs) || 0), 0);
   elements.totalCount.textContent = String(records.length);
   elements.successCount.textContent = String(successCount);
@@ -90,13 +90,14 @@ function createRecordCard(record) {
   const isClick = record.captchaType === 'click';
   const isSlider = record.captchaType === 'slider';
   const success = record.status === 'success';
-  card.classList.toggle('is-error', !success);
+  const pending = record.status === 'pending';
+  card.classList.toggle('is-error', record.status === 'error');
   card.querySelector('.type-badge').textContent = isClick
     ? '点选验证码'
     : (isSlider ? '滑动验证码' : '字符验证码');
   const statusBadge = card.querySelector('.status-badge');
-  statusBadge.textContent = success ? '成功' : '失败';
-  statusBadge.classList.add(success ? 'success' : 'error');
+  statusBadge.textContent = pending ? '等待结果' : (success ? '成功' : '失败');
+  statusBadge.classList.add(pending ? 'pending' : (success ? 'success' : 'error'));
   card.querySelector('.source').textContent = record.source || '未知来源';
   card.querySelector('.timestamp').textContent = formatTime(record.finishedAt, true);
   card.querySelector('.duration').textContent = `${record.durationMs} ms`;
@@ -110,9 +111,11 @@ function createRecordCard(record) {
     ...(record.context || {})
   }, null, 2);
 
-  const resultText = success
-    ? (typeof record.result === 'string' ? record.result : JSON.stringify(record.result, null, 2))
-    : '(无结果)';
+  const resultText = pending
+    ? '(滑动已记录，页面在最终状态写入前发生跳转或仍在等待结果)'
+    : (success
+      ? (typeof record.result === 'string' ? record.result : JSON.stringify(record.result, null, 2))
+      : '(无结果)');
   card.querySelector('.result').textContent = resultText || '(空字符串)';
 
   const errorElement = card.querySelector('.error-message');
@@ -344,6 +347,7 @@ function renderSliderDebugDetails(container, details) {
     ['校验结果类型', outcome.type],
     ['结果说明', outcome.message],
     ['等待画布', formatDuration(details.timings?.elementsReadyMs)],
+    ['重复验证码刷新等待', formatDuration(details.timings?.duplicateChallengeWaitMs)],
     ['滑动后缓冲等待', formatDuration(details.timings?.postDragDelayMs)],
     ['等待校验结果', formatDuration(details.timings?.verificationWaitMs)],
     ['本次尝试总耗时', formatDuration(details.timings?.totalAttemptMs)]

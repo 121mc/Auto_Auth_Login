@@ -108,6 +108,57 @@
     }
     return null;
   }
+
+  function getCanvasFingerprint(canvas) {
+    try {
+      const width = canvas.width;
+      const height = canvas.height;
+      const pixels = canvas.getContext('2d', { willReadFrequently: true })
+        .getImageData(0, 0, width, height).data;
+      let hash = 2166136261;
+      const columns = 24;
+      const rows = 16;
+      for (let row = 0; row < rows; row++) {
+        const y = Math.min(height - 1, Math.floor((row + 0.5) * height / rows));
+        for (let column = 0; column < columns; column++) {
+          const x = Math.min(width - 1, Math.floor((column + 0.5) * width / columns));
+          const index = (y * width + x) * 4;
+          for (let channel = 0; channel < 4; channel++) {
+            hash ^= pixels[index + channel];
+            hash = Math.imul(hash, 16777619);
+          }
+        }
+      }
+      return `${width}x${height}:${hash >>> 0}`;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function getSliderChallengeFingerprint(elements) {
+    if (!elements) return null;
+    const background = getCanvasFingerprint(elements.backgroundCanvas);
+    const block = getCanvasFingerprint(elements.blockCanvas);
+    return background && block ? `${background}|${block}` : null;
+  }
+
+  async function waitForSliderChallengeRefresh(previousFingerprint, previousElements, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = getSliderElements();
+      if (current) {
+        const fingerprint = getSliderChallengeFingerprint(current);
+        if (current.root !== previousElements?.root ||
+            current.blockCanvas !== previousElements?.blockCanvas ||
+            (fingerprint && fingerprint !== previousFingerprint)) {
+          return true;
+        }
+      }
+      await sleep(50);
+    }
+    return false;
+  }
+
   function findSliderTarget(elements, debugDetails = null) {
     const { blockCanvas, backgroundCanvas } = elements;
     const width = backgroundCanvas.width;
@@ -200,19 +251,12 @@
     return bestLeft;
   }
 
-  const sliderTrajectoryFiles = ['1.json', '2.json', '3.json', '4.json', '5.json'];
-  const sliderTrajectoryIntervalMs = 1;
+  const sliderTrajectoryFiles = ['3.json'];
+  const sliderTrajectoryIntervalMs = 2;
   const sliderTrajectoryMaxPointsPerFrame = 24;
-  let lastSliderTrajectoryIndex = -1;
 
   function pickSliderTrajectoryFile() {
-    let index = Math.floor(Math.random() * sliderTrajectoryFiles.length);
-    if (sliderTrajectoryFiles.length > 1 && index === lastSliderTrajectoryIndex) {
-      index = (index + 1 + Math.floor(Math.random() * (sliderTrajectoryFiles.length - 1))) %
-              sliderTrajectoryFiles.length;
-    }
-    lastSliderTrajectoryIndex = index;
-    return sliderTrajectoryFiles[index];
+    return sliderTrajectoryFiles[Math.floor(Math.random() * sliderTrajectoryFiles.length)];
   }
 
   async function loadSliderTrajectory() {
@@ -239,11 +283,23 @@
   }
 
   async function recordSliderDebugAttempt(payload) {
-    try {
-      await chrome.runtime.sendMessage({ action: 'recordSliderCaptchaDebug', ...payload });
-    } catch (error) {
-      console.error('[NJU Auto Auth][debug] Failed to record slider attempt:', error);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          action: 'recordSliderCaptchaDebug',
+          ...payload
+        });
+        if (response?.error) throw new Error(response.error);
+        return true;
+      } catch (error) {
+        if (attempt === 2) {
+          console.error('[NJU Auto Auth][debug] Failed to record slider attempt:', error);
+          return false;
+        }
+        await sleep(25);
+      }
     }
+    return false;
   }
 
   function scaleSliderTrajectory(points, dragDistance, sliderTravel) {
@@ -378,12 +434,14 @@
   async function solveSliderCaptcha(maxAttempts = 5) {
     const debugState = await chrome.storage.local.get('nju_debug_mode');
     const sliderDebugEnabled = debugState.nju_debug_mode === true;
+    let previousChallengeFingerprint = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const attemptStartedAt = Date.now();
       const performanceStartedAt = performance.now();
       const timings = {};
       let elements = null;
+      let challengeFingerprint = null;
       let imageData = '';
       let canvasDetails = null;
       let targetLeft = null;
@@ -391,15 +449,17 @@
       let trajectoryDetails = null;
       let stage = '等待滑块画布';
       let outcome = { type: 'unknown', message: '尚未得到校验结果' };
-      let debugRecorded = false;
+      const debugRecordId = sliderDebugEnabled ? crypto.randomUUID() : null;
+      let debugFinalized = false;
 
-      const writeDebugRecord = async (success, error = '') => {
-        if (!sliderDebugEnabled || debugRecorded) return;
-        debugRecorded = true;
+      const writeDebugRecord = async (status, error = '') => {
+        if (!sliderDebugEnabled || debugFinalized) return;
         timings.totalAttemptMs = performance.now() - performanceStartedAt;
-        await recordSliderDebugAttempt({
+        const saved = await recordSliderDebugAttempt({
+          recordId: debugRecordId,
+          status,
           imageData,
-          result: success ? {
+          result: status === 'success' ? {
             targetLeft,
             dragDistance: trajectoryDetails?.dragDistance,
             trajectoryFile: trajectoryDetails?.filename,
@@ -411,6 +471,7 @@
           context: {
             attempt,
             maxAttempts,
+            challengeFingerprint,
             pageUrl: window.location.href
           },
           debugDetails: {
@@ -429,6 +490,7 @@
             outcome
           }
         });
+        if (saved && status !== 'pending') debugFinalized = true;
       };
 
       try {
@@ -437,6 +499,25 @@
         elements = await waitForSliderElements(5000);
         timings.elementsReadyMs = performance.now() - elementsStartedAt;
         if (!elements) throw new Error('Timed out while loading slider captcha');
+
+        challengeFingerprint = getSliderChallengeFingerprint(elements);
+        if (previousChallengeFingerprint && challengeFingerprint === previousChallengeFingerprint) {
+          stage = '等待新验证码';
+          const duplicateWaitStartedAt = performance.now();
+          const refreshed = await waitForSliderChallengeRefresh(
+            previousChallengeFingerprint,
+            elements,
+            5000
+          );
+          timings.duplicateChallengeWaitMs = performance.now() - duplicateWaitStartedAt;
+          if (!refreshed) throw new Error('Slider captcha did not refresh after the previous attempt');
+          elements = await waitForSliderElements(5000);
+          challengeFingerprint = getSliderChallengeFingerprint(elements);
+          if (!elements || !challengeFingerprint || challengeFingerprint === previousChallengeFingerprint) {
+            throw new Error('Refusing to retry the same slider captcha');
+          }
+        }
+        previousChallengeFingerprint = challengeFingerprint;
 
         if (sliderDebugEnabled) {
           const captureStartedAt = performance.now();
@@ -476,6 +557,10 @@
         timings.trajectoryLoadAndScaleMs = trajectoryDetails.trajectoryLoadAndScaleMs;
         timings.trajectoryPlaybackMs = trajectoryDetails.actualPlaybackDurationMs;
 
+        stage = '滑动已完成';
+        outcome = { type: 'dispatched', message: 'mouseup 已派发，等待校验结果' };
+        await writeDebugRecord('pending');
+
         stage = '滑动后等待';
         const postDragDelayStartedAt = performance.now();
         await sleep(500);
@@ -489,14 +574,14 @@
             timings.verificationWaitMs = performance.now() - verificationStartedAt;
             stage = '校验成功';
             outcome = { type: 'redirect', message: '页面已离开统一身份认证登录页' };
-            await writeDebugRecord(true);
+            await writeDebugRecord('success');
             return true;
           }
           if (elements.sliderContainer.classList.contains('sliderContainer_success')) {
             timings.verificationWaitMs = performance.now() - verificationStartedAt;
             stage = '校验成功';
             outcome = { type: 'success-class', message: '检测到 sliderContainer_success' };
-            await writeDebugRecord(true);
+            await writeDebugRecord('success');
             log('Slider verified; waiting for login submission...');
             const loginOutcome = await waitForLoginOutcome(6000);
             if (loginOutcome.success) return true;
@@ -515,16 +600,16 @@
           await sleep(100);
         }
 
-        if (!timings.verificationWaitMs) {
+        if (timings.verificationWaitMs == null) {
           timings.verificationWaitMs = performance.now() - verificationStartedAt;
           stage = '校验超时';
           outcome = { type: 'timeout', message: '2.5 秒内未观察到成功或失败状态' };
         }
-        await writeDebugRecord(false, outcome.message);
+        await writeDebugRecord('error', outcome.message);
       } catch (error) {
         stage = stage === '校验成功' ? stage : '执行异常';
         outcome = { type: 'exception', message: error.message || String(error) };
-        await writeDebugRecord(false, outcome.message);
+        await writeDebugRecord('error', outcome.message);
         throw error;
       }
 
