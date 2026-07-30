@@ -2,18 +2,18 @@
 
 面向南京大学统一身份认证与选课系统的浏览器自动登录扩展。
 
-扩展可自动填写学号/工号和密码，并在浏览器本地使用 ONNX 模型识别验证码。它支持访问统一身份认证页面时自动登录、定时检查认证状态，以及进入选课系统时自动处理点选验证码。
+扩展可自动填写学号/工号和密码。统一身份认证登录会在提交账号密码后完成滑动验证；选课系统的点选验证码则在浏览器本地使用 ONNX 模型识别。
 
 > [!IMPORTANT]
 > 本项目为非官方工具，仅供学习与个人使用。请自行评估账号安全、学校相关规定及页面变更带来的风险。
 
 ## 功能
 
-- 统一身份认证页自动登录
+- 统一身份认证页自动填写账号密码并完成滑动验证
 - 每隔 3–5 分钟随机检查一次登录状态
 - 登录失效后自动打开认证页并重新登录
 - 选课系统登录页自动填写账号、识别并点击验证码
-- 普通字符验证码与中文点选验证码均在本地识别
+- 选课系统中文点选验证码在本地识别
 - Popup 面板展示当前状态、下次检查时间和运行日志
 - 保存账号时使用 `--debug-学号` 可开启验证码 Debug 页面
 - 所有模型和推理依赖均随扩展提供，无需调用第三方验证码服务
@@ -22,7 +22,7 @@
 
 | 场景 | 地址 | 功能 |
 | --- | --- | --- |
-| 南京大学统一身份认证 | `https://authserver.nju.edu.cn/authserver/login*` | 自动填写、识别字符验证码并提交 |
+| 南京大学统一身份认证 | `https://authserver.nju.edu.cn/authserver/login*` | 自动填写账号密码、提交并完成滑动验证 |
 | 南京大学选课系统 | `https://xk.nju.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do` | 自动填写、识别中文点选验证码并登录 |
 
 扩展使用 Manifest V3，适用于支持加载解压扩展的 Chromium 浏览器，例如 Chrome 和 Edge。
@@ -62,10 +62,9 @@
 1. Background Service Worker 使用 `chrome.alarms` 安排状态检查。
 2. 扩展请求认证登录页，并根据响应判断当前会话是否仍然有效。
 3. 会话失效时，扩展在后台打开统一身份认证登录页。
-4. Content Script 填写账号和密码，读取验证码图片。
-5. Offscreen Document 使用 ONNX Runtime Web 和本地 OCR 模型识别验证码。
-6. 扩展回填验证码并提交表单；验证码错误时会刷新并重试。
-7. 登录成功后更新状态，并关闭由扩展打开的登录标签页。
+4. Content Script 填写账号和密码并点击登录。
+5. 滑动验证码出现后，扩展定位缺口并模拟滑动轨迹完成验证。
+6. 登录成功后更新状态，并关闭由扩展打开的登录标签页。
 
 ### 选课系统
 
@@ -91,15 +90,15 @@
 │   └── popup.js
 ├── offscreen/
 │   ├── offscreen.html
-│   └── offscreen.js                图像预处理与 ONNX 推理
+│   └── offscreen.js                选课验证码图像预处理与 ONNX 推理
 ├── lib/
 │   ├── ort.wasm.min.js             ONNX Runtime Web
 │   ├── ort-wasm-simd-threaded.mjs
 │   └── ort-wasm-simd-threaded.wasm
 ├── models/
-│   ├── common_old.onnx             OCR 模型
-│   ├── common_det.onnx             文字检测模型
-│   └── charset_old.json            OCR 字符集
+│   ├── common_old.onnx             选课点选验证码 OCR 模型
+│   ├── common_det.onnx             选课点选验证码文字检测模型
+│   └── charset_old.json            选课点选验证码 OCR 字符集
 └── icons/
     └── icon128.png
 ```
@@ -110,7 +109,7 @@
 | --- | --- |
 | `storage` | 在浏览器本地保存凭据、设置、状态和日志 |
 | `alarms` | 定时检查统一身份认证会话 |
-| `offscreen` | 在 Offscreen Document 中执行图像处理和 ONNX 推理 |
+| `offscreen` | 为选课点选验证码执行图像处理和 ONNX 推理 |
 | `tabs` | 打开、跟踪和关闭扩展发起的认证标签页 |
 | `activeTab` | 与当前活动标签页交互 |
 | `unlimitedStorage` | Debug 模式下保存每次验证码原图与识别详情 |
@@ -120,8 +119,8 @@
 ## 安全与隐私
 
 - 学号/工号和密码保存在 `chrome.storage.local` 中。
-- 凭据和验证码不会发送给第三方识别服务。
-- 验证码图片、检测和 OCR 推理均在浏览器本地完成。
+- 凭据和选课验证码不会发送给第三方识别服务。
+- 选课验证码图片、检测和 OCR 推理均在浏览器本地完成。
 - 扩展只声明统一身份认证与选课系统所需的站点访问权限。
 
 需要注意，`chrome.storage.local` 并不是专用密码保险箱。任何能够读取该浏览器配置文件或扩展本地数据的人，都可能接触到保存的凭据。请只在可信的个人设备和浏览器配置中使用，不建议在公用电脑上保存密码。

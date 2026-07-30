@@ -125,10 +125,10 @@
     return { outputData, numClasses, seqLen };
   }
 
-  // --- Solve OCR captcha ---
-  async function solveCaptcha(imageDataBase64, isChinese = false, includeDebugDetails = false) {
+  // --- Recognize the Chinese prompt in a course-selection click captcha ---
+  async function recognizeClickCaptchaPrompt(imageDataBase64, includeDebugDetails = false) {
     const imageData = await decodeImage(imageDataBase64);
-    console.log(`[ONNX OCR] Input image: ${imageData.width}x${imageData.height}, isChinese: ${isChinese}`);
+    console.log(`[ONNX OCR] Click captcha prompt: ${imageData.width}x${imageData.height}`);
 
     const { outputData, numClasses, seqLen } = await runOcrInference(imageData);
     if (seqLen === 0) {
@@ -173,11 +173,7 @@
       }
     }
 
-    // Clean result
-    // If it's Chinese target/click captcha, keep only Chinese. Otherwise alphanumeric.
-    const cleaned = isChinese
-      ? result.trim().replace(/[^\u4e00-\u9fa5]/g, '')
-      : result.trim().replace(/[^a-zA-Z0-9]/g, '');
+    const cleaned = result.trim().replace(/[^\u4e00-\u9fa5]/g, '');
 
     console.log(`[ONNX OCR] Raw: "${result}", Cleaned: "${cleaned}"`);
     if (includeDebugDetails) {
@@ -628,7 +624,7 @@
       }
 
       // 3. Solve OCR on the exact bottom-bar crop to get prompt characters.
-      const promptOcrOutput = await solveCaptcha(barBase64, true, captureDebug);
+      const promptOcrOutput = await recognizeClickCaptchaPrompt(barBase64, captureDebug);
       const cleanedOcrText = captureDebug
         ? promptOcrOutput.cleanedResult
         : promptOcrOutput;
@@ -909,18 +905,6 @@
           sendResponse({ error: err.message });
         });
       return true;
-    }
-
-    if (message.action === 'offscreen_solveCaptcha') {
-      solveCaptcha(message.imageData, false)
-        .then(result => {
-          sendResponse({ result });
-        })
-        .catch(err => {
-          console.error('[ONNX] Solve failed:', err);
-          sendResponse({ error: err.message });
-        });
-      return true; // Keep message channel open
     }
 
     if (message.action === 'offscreen_solveClickCaptcha') {

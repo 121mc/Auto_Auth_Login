@@ -190,14 +190,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.action === 'solveCaptcha') {
-    // Forward to offscreen document
-    handleSolveCaptcha(message.imageData, message.debugContext)
-      .then(result => sendResponse({ result }))
-      .catch(err => sendResponse({ error: err.message }));
-    return true; // Keep message channel open for async response
-  }
-
   if (message.action === 'prewarmClickCaptcha') {
     handlePrewarmClickCaptcha()
       .then(() => sendResponse({ ok: true }))
@@ -380,44 +372,6 @@ async function handleUpdateSettings(enabled) {
       nju_next_check: null
     });
     await addLog('定时检查已禁用');
-  }
-}
-
-async function handleSolveCaptcha(imageData, debugContext = {}) {
-  const startedAt = Date.now();
-
-  try {
-    await ensureOffscreenDocument();
-    const result = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('验证码识别超时'));
-      }, 30000);
-
-      chrome.runtime.sendMessage(
-        { action: 'offscreen_solveCaptcha', imageData },
-        (response) => {
-          clearTimeout(timeout);
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-            return;
-          }
-          if (response && response.error) {
-            reject(new Error(response.error));
-            return;
-          }
-          resolve(response.result);
-        }
-      );
-    });
-    await safelyRecordCaptchaDebug({
-      captchaType: 'text', imageData, result, startedAt, context: debugContext
-    });
-    return result;
-  } catch (err) {
-    await safelyRecordCaptchaDebug({
-      captchaType: 'text', imageData, error: err.message, startedAt, context: debugContext
-    });
-    throw err;
   }
 }
 

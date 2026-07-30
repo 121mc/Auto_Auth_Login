@@ -348,7 +348,6 @@ function renderSliderDebugDetails(container, details) {
     ['结果说明', outcome.message],
     ['等待画布', formatDuration(details.timings?.elementsReadyMs)],
     ['重复验证码刷新等待', formatDuration(details.timings?.duplicateChallengeWaitMs)],
-    ['滑动后缓冲等待', formatDuration(details.timings?.postDragDelayMs)],
     ['等待校验结果', formatDuration(details.timings?.verificationWaitMs)],
     ['本次尝试总耗时', formatDuration(details.timings?.totalAttemptMs)]
   ]));
